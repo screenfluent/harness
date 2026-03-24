@@ -4,8 +4,6 @@ set -euo pipefail
 
 HARNESS_VERSION="0.1.0"
 readonly HARNESS_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-readonly HARNESS_CORE="${HARNESS_ROOT}/plugins/core"
-
 # Overridable
 HARNESS_HOME="${HARNESS_HOME:-${HOME}/.harness}"
 HARNESS_SESSIONS="${HARNESS_SESSIONS:-${HARNESS_HOME}/sessions}"
@@ -48,6 +46,35 @@ _init_dirs() {
   fi
 }
 
+# Build ordered list of all plugin sources (lowest to highest priority).
+# Each source is a directory that may contain tools/, hooks.d/, providers/.
+#
+# Order: bundled plugins (sorted) → for each .harness/ dir (global to local):
+#   plugins/*/ within that dir (sorted), then the dir itself.
+_HARNESS_SOURCES=()
+_init_sources() {
+  (( ${#_HARNESS_SOURCES[@]} )) && return 0
+  _init_dirs
+
+  # Bundled plugins shipped with harness (lowest priority)
+  local d
+  for d in "${HARNESS_ROOT}/plugins"/*/; do
+    [[ -d "${d}" ]] && _HARNESS_SOURCES+=("${d%/}")
+  done
+
+  # .harness/ dirs: most-global first (reverse of _HARNESS_DIRS)
+  local i
+  for (( i=${#_HARNESS_DIRS[@]}-1; i>=0; i-- )); do
+    local hd="${_HARNESS_DIRS[i]}"
+    # Plugin packs within this .harness/ dir
+    for d in "${hd}/plugins"/*/; do
+      [[ -d "${d}" ]] && _HARNESS_SOURCES+=("${d%/}")
+    done
+    # The .harness/ dir itself (highest priority at this level)
+    _HARNESS_SOURCES+=("${hd}")
+  done
+}
+
 # --------------------------------------------------------------------------- #
 #  Hook runner                                                                 #
 # --------------------------------------------------------------------------- #
@@ -68,20 +95,16 @@ run_hooks() {
   # Extra args become positional params for the hooks
   local extra_args=("$@")
 
-  _init_dirs
+  _init_sources
 
-  # Collect hooks: iterate dirs from most-global to most-local so that
-  # local entries override globals sharing the same basename.
+  # Collect hooks from all sources (lowest to highest priority).
+  # Later entries override earlier ones sharing the same basename.
   declare -A hook_map  # basename -> full path
   local order=()
 
-  # Core plugins (lowest priority)
-  _collect_hooks_from "${HARNESS_CORE}/hooks.d/${stage}" hook_map order
-
-  # .harness/ dirs: most-global last in _HARNESS_DIRS, so reverse
-  local i
-  for (( i=${#_HARNESS_DIRS[@]}-1; i>=0; i-- )); do
-    _collect_hooks_from "${_HARNESS_DIRS[i]}/hooks.d/${stage}" hook_map order
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    _collect_hooks_from "${src}/hooks.d/${stage}" hook_map order
   done
 
   # Sort by basename (numeric prefix gives order)
@@ -144,16 +167,12 @@ _collect_hooks_from() {
 # --------------------------------------------------------------------------- #
 # Tools are executables in tools/ directories that respond to --schema.
 discover_tools() {
-  _init_dirs
+  _init_sources
   declare -A tool_map  # name -> path (local overrides global)
 
-  # Core tools (lowest priority)
-  _collect_tools_from "${HARNESS_CORE}/tools" tool_map
-
-  # .harness/ dirs (most-global to most-local)
-  local i
-  for (( i=${#_HARNESS_DIRS[@]}-1; i>=0; i-- )); do
-    _collect_tools_from "${_HARNESS_DIRS[i]}/tools" tool_map
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    _collect_tools_from "${src}/tools" tool_map
   done
 
   # Output as JSON array
@@ -170,12 +189,11 @@ discover_tools() {
 # Also export a lookup: tool name -> executable path
 declare -A TOOL_PATHS
 _build_tool_paths() {
-  _init_dirs
+  _init_sources
   TOOL_PATHS=()
-  _collect_tools_from "${HARNESS_CORE}/tools" TOOL_PATHS
-  local i
-  for (( i=${#_HARNESS_DIRS[@]}-1; i>=0; i-- )); do
-    _collect_tools_from "${_HARNESS_DIRS[i]}/tools" TOOL_PATHS
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    _collect_tools_from "${src}/tools" TOOL_PATHS
   done
 }
 
@@ -196,13 +214,15 @@ _collect_tools_from() {
 # --------------------------------------------------------------------------- #
 find_provider() {
   local name="$1"
-  _init_dirs
-  # Check .harness/ dirs (most-local first)
-  for d in "${_HARNESS_DIRS[@]}"; do
-    [[ -x "${d}/providers/${name}" ]] && { echo "${d}/providers/${name}"; return 0; }
+  _init_sources
+  # Search highest priority first (reverse of sources order)
+  local i
+  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
+    [[ -x "${_HARNESS_SOURCES[i]}/providers/${name}" ]] && {
+      echo "${_HARNESS_SOURCES[i]}/providers/${name}"
+      return 0
+    }
   done
-  # Check core
-  [[ -x "${HARNESS_CORE}/providers/${name}" ]] && { echo "${HARNESS_CORE}/providers/${name}"; return 0; }
   _log "provider '${name}' not found"
   return 1
 }
@@ -458,10 +478,11 @@ cmd_tools() {
 
 cmd_hooks() {
   local stage="${1:-}"
-  _init_dirs
-  local search_dirs=("${HARNESS_CORE}/hooks.d")
-  for d in "${_HARNESS_DIRS[@]}"; do
-    search_dirs+=("${d}/hooks.d")
+  _init_sources
+  local search_dirs=()
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    search_dirs+=("${src}/hooks.d")
   done
   for sd in "${search_dirs[@]}"; do
     [[ -d "${sd}" ]] || continue
@@ -508,7 +529,9 @@ environment:
 
 plugin dirs:
   .harness/ directories are discovered by walking from CWD up to /.
-  each can contain: hooks.d/ tools/ providers/
+  each can contain: hooks.d/ tools/ providers/ plugins/
+  bundled plugins live in <harness-root>/plugins/*/
+  plugin packs in .harness/plugins/*/ follow the same layout.
   local dirs override global ones (by basename).
 EOF
 }
