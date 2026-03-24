@@ -17,7 +17,9 @@ ln -s ~/src/harness/bin/harness ~/.local/bin/hs  # alias
 ## Quick start
 
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Set an API key for any discovered provider
+export ANTHROPIC_API_KEY="sk-ant-..."  # or
+export ZAI_AUTH_TOKEN="..."
 
 # One-shot: run an agent to completion
 hs run "find all TODO comments in this repo and create a summary"
@@ -28,11 +30,14 @@ hs chat
 # Resume a session
 hs session list
 hs chat 20260324-143022-12345
+
+# See what's discovered from your current directory
+hs help
 ```
 
 ## How it works
 
-The harness script is about 400 lines. It does three things:
+The core logic is about 550 lines. It does three things:
 
 1. **Walks up from CWD** collecting every `.harness/` directory it finds, from the current project up to `$HOME`. Each can contain `tools/`, `hooks.d/`, `providers/`, `prompts/`, and a `HARNESS.md` file. Local directories override global ones by basename.
 
@@ -81,9 +86,20 @@ Naming convention: `NN-name` where NN controls execution order. Examples:
 
 ### Providers
 
-Executables in `providers/` directories. Receive the assembled payload JSON on stdin, output the raw API response. Select with `HARNESS_PROVIDER=name` or `--provider name`.
+Executables in `providers/` directories. Receive the assembled payload JSON on stdin, output the raw API response. Providers also support introspection flags for auto-discovery:
 
-Built-in: `anthropic`. Writing an OpenAI-compatible provider means mapping the payload format and calling a different endpoint — about 60 lines of bash.
+```bash
+my-provider --describe  # one-line description
+my-provider --ready     # exit 0 if credentials are configured
+my-provider --defaults  # key=value pairs (e.g. model=claude-sonnet-4-20250514)
+my-provider --env       # list supported env vars with descriptions
+```
+
+If `HARNESS_PROVIDER` is not set, harness auto-selects the first discovered provider whose `--ready` exits 0, and loads its `--defaults` for unset vars like `HARNESS_MODEL`.
+
+Built-in: `anthropic`, `zai`. Writing a new provider means mapping the payload format and calling a different endpoint — about 50 lines of bash.
+
+See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plugin types.
 
 ## Directory structure
 
@@ -140,11 +156,11 @@ The message assembler hook (`10-messages`) reconstitutes the API messages array 
 |---|---|---|
 | `HARNESS_HOME` | `~/.harness` | Base config directory |
 | `HARNESS_SESSIONS` | nearest `.harness/sessions/` up from CWD, else `$HARNESS_HOME/sessions` | Session storage (auto-discovered) |
-| `HARNESS_MODEL` | `claude-sonnet-4-20250514` | Model identifier |
-| `HARNESS_PROVIDER` | `anthropic` | Provider plugin name |
+| `HARNESS_MODEL` | auto from provider `--defaults` | Model identifier |
+| `HARNESS_PROVIDER` | auto: first provider with credentials | Provider plugin name |
 | `HARNESS_MAX_TURNS` | `100` | Max loop iterations |
-| `ANTHROPIC_API_KEY` | (required) | Anthropic API key |
-| `ANTHROPIC_MAX_TOKENS` | `8192` | Max response tokens |
+
+Provider-specific env vars (API keys, endpoints, etc.) are listed by `hs help` and documented via each provider's `--env` flag.
 
 ## Extending
 

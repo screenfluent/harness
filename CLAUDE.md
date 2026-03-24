@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Harness is a minimal agent loop in bash. The core script (~530 lines) handles plugin discovery, hook dispatch, and the agentic loop. Everything else — tools, providers, prompt loading, message serialization, cost tracking, approval gates — lives in plugins that can be written in any language.
+Harness is a minimal agent loop in bash. The core script (~550 lines) handles plugin discovery, hook dispatch, and the agentic loop. Everything else — tools, providers, prompt loading, message serialization, cost tracking, approval gates — lives in plugins that can be written in any language.
 
 Dependencies: bash 4+, jq, curl. No package manager, no language runtime.
 
@@ -46,7 +46,7 @@ Harness walks from CWD upward to `/`, collecting `.harness/` directories. Local 
 
 **Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `on-start`, `assemble`, `pre-tool`, `receive`, `tool-done`, `on-error`, `on-end`.
 
-**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Built-in: `anthropic`, `zai`. Selected via `HARNESS_PROVIDER`.
+**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `zai`.
 
 **Prompts** (`HARNESS.md` + `prompts/*.md`): Concatenated into the system prompt by the `30-prompts` assemble hook. Global first, local last.
 
@@ -72,4 +72,6 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 - Tools and hooks are executable files, not sourced scripts
 - Hook naming: `NN-name` where NN is a two-digit sort key
 - Tool protocol: `--schema` (JSON), `--describe` (one-line), `--exec` (JSON stdin → stdout)
+- Provider protocol: `--describe`, `--ready`, `--defaults`, `--env`, plus stdin→stdout for execution
+- Full protocol docs in `docs/PROTOCOLS.md`
 - `HARNESS_CWD` tracks the session's original working directory; tools use it
