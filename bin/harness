@@ -29,90 +29,94 @@ HARNESS_LOG="${HARNESS_LOG:-/dev/stderr}"
 # Everything else comes from plugins (see 30-prompts hook).
 HARNESS_SYSTEM="You are an autonomous agent running in a terminal. Use your tools to complete the task. Be direct. When done, say DONE."
 
+# State machine default transitions
+declare -A DEFAULT_NEXT=(
+  [start]=assemble
+  [assemble]=send
+  [send]=receive
+  [receive]=done
+  [tool_exec]=tool_done
+  [tool_done]=assemble
+  [error]=done
+)
+
 # --------------------------------------------------------------------------- #
-#  Directory walking                                                           #
+#  Source discovery                                                            #
 # --------------------------------------------------------------------------- #
-# Walk from CWD up to / collecting every .harness/ dir found.
-# Result order: most-local first (CWD), most-global last (home/root).
-discover_dirs() {
-  local dirs=()
+# Fully dynamic — called every loop iteration. Walks CWD upward collecting
+# .harness/ dirs and bundled plugins. Provider plugins (dirs containing a
+# providers/ subdir) are skipped if their basename != HARNESS_PROVIDER.
+
+_HARNESS_SOURCES=()
+
+_discover_sources() {
+  _HARNESS_SOURCES=()
+
+  # Bundled plugins (lowest priority)
+  local d
+  for d in "${HARNESS_ROOT}/plugins"/*/; do
+    [[ -d "${d}" ]] || continue
+    d="${d%/}"
+    if [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]]; then
+      continue
+    fi
+    _HARNESS_SOURCES+=("${d}")
+  done
+
+  # Collect .harness/ dirs: CWD upward (most-local first)
+  local harness_dirs=()
   local cur="${PWD}"
   while true; do
-    [[ -d "${cur}/.harness" ]] && dirs+=("${cur}/.harness")
+    [[ -d "${cur}/.harness" ]] && harness_dirs+=("${cur}/.harness")
     [[ "${cur}" == "/" ]] && break
     cur="$(dirname "${cur}")"
   done
-  # Ensure ~/.harness always present (may already be in list)
+  # Ensure ~/.harness always present
   local found=0
-  for d in "${dirs[@]:-}"; do
+  for d in "${harness_dirs[@]:-}"; do
     [[ "${d}" == "${HARNESS_HOME}" ]] && found=1
   done
-  (( found )) || dirs+=("${HARNESS_HOME}")
-  printf '%s\n' "${dirs[@]}"
-}
+  (( found )) || harness_dirs+=("${HARNESS_HOME}")
 
-# Cache discovered dirs for the session lifetime
-_HARNESS_DIRS=()
-_init_dirs() {
-  if (( ${#_HARNESS_DIRS[@]} == 0 )); then
-    mapfile -t _HARNESS_DIRS < <(discover_dirs)
-  fi
-}
-
-# Build ordered list of all plugin sources (lowest to highest priority).
-# Each source is a directory that may contain tools/, hooks.d/, providers/.
-#
-# Order: bundled plugins (sorted) → for each .harness/ dir (global to local):
-#   plugins/*/ within that dir (sorted), then the dir itself.
-_HARNESS_SOURCES=()
-_init_sources() {
-  (( ${#_HARNESS_SOURCES[@]} )) && return 0
-  _init_dirs
-
-  # Bundled plugins shipped with harness (lowest priority)
-  local d
-  for d in "${HARNESS_ROOT}/plugins"/*/; do
-    [[ -d "${d}" ]] && _HARNESS_SOURCES+=("${d%/}")
-  done
-
-  # .harness/ dirs: most-global first (reverse of _HARNESS_DIRS)
+  # Process global-first (reverse of harness_dirs)
   local i
-  for (( i=${#_HARNESS_DIRS[@]}-1; i>=0; i-- )); do
-    local hd="${_HARNESS_DIRS[i]}"
-    # Plugin packs within this .harness/ dir
+  for (( i=${#harness_dirs[@]}-1; i>=0; i-- )); do
+    local hd="${harness_dirs[i]}"
     for d in "${hd}/plugins"/*/; do
-      [[ -d "${d}" ]] && _HARNESS_SOURCES+=("${d%/}")
+      [[ -d "${d}" ]] || continue
+      d="${d%/}"
+      if [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]]; then
+        continue
+      fi
+      _HARNESS_SOURCES+=("${d}")
     done
-    # The .harness/ dir itself (highest priority at this level)
     _HARNESS_SOURCES+=("${hd}")
   done
+
+  # Export colon-separated list for hooks
+  local joined=""
+  for d in "${_HARNESS_SOURCES[@]}"; do
+    [[ -n "${joined}" ]] && joined+=":"
+    joined+="${d}"
+  done
+  export HARNESS_SOURCES="${joined}"
 }
 
 # --------------------------------------------------------------------------- #
 #  Hook runner                                                                 #
 # --------------------------------------------------------------------------- #
 # Hooks are executables in hooks.d/<stage>/ directories. They are collected
-# from all .harness/ dirs (local overrides global by basename), sorted by
-# numeric prefix, and run as a pipeline: each hook's stdout feeds the next
-# hook's stdin. Non-zero exit aborts the chain.
-#
-# Environment passed to every hook:
-#   HARNESS_SESSION  — path to current session dir
-#   HARNESS_STAGE    — hook stage name
-#   HARNESS_MODEL    — current model
-#   HARNESS_PROVIDER — current provider
-#   Plus any extra env vars set by the caller.
+# from all sources (local overrides global by basename), sorted by numeric
+# prefix, and run as a pipeline: each hook's stdout feeds the next hook's
+# stdin. Non-zero exit aborts the chain.
 
 run_hooks() {
   local stage="$1"; shift
-  # Extra args become positional params for the hooks
   local extra_args=("$@")
-
-  _init_sources
 
   # Collect hooks from all sources (lowest to highest priority).
   # Later entries override earlier ones sharing the same basename.
-  declare -A hook_map  # basename -> full path
+  declare -A hook_map
   local order=()
 
   local src
@@ -128,7 +132,6 @@ run_hooks() {
   local seen=()
   for base in "${sorted[@]:-}"; do
     [[ -z "${base}" ]] && continue
-    # Skip if we already added this basename
     local dup=0
     for s in "${seen[@]:-}"; do [[ "$s" == "$base" ]] && dup=1; done
     (( dup )) && continue
@@ -142,6 +145,7 @@ run_hooks() {
 
   export HARNESS_SESSION="${SESSION_DIR:-}" HARNESS_STAGE="${stage}"
   export HARNESS_MODEL HARNESS_PROVIDER HARNESS_SYSTEM HARNESS_ROOT
+  export HARNESS_LOG HARNESS_SOURCES
 
   for hook in "${hooks[@]:-}"; do
     [[ -z "${hook}" ]] && continue
@@ -168,7 +172,6 @@ _collect_hooks_from() {
     [[ -x "${f}" ]] || continue
     local base="$(basename "${f}")"
     map_ref["${base}"]="${f}"
-    # Track for sorting — avoid duplicates in order list
     local found=0
     for o in "${order_ref[@]:-}"; do [[ "$o" == "$base" ]] && found=1; done
     (( found )) || order_ref+=("${base}")
@@ -176,19 +179,17 @@ _collect_hooks_from() {
 }
 
 # --------------------------------------------------------------------------- #
-#  Tool discovery                                                              #
+#  Tool discovery (for CLI commands)                                           #
 # --------------------------------------------------------------------------- #
-# Tools are executables in tools/ directories that respond to --schema.
 discover_tools() {
-  _init_sources
-  declare -A tool_map  # name -> path (local overrides global)
+  _discover_sources
+  declare -A tool_map
 
   local src
   for src in "${_HARNESS_SOURCES[@]}"; do
     _collect_tools_from "${src}/tools" tool_map
   done
 
-  # Output as JSON array
   local schemas="[]"
   for name in "${!tool_map[@]}"; do
     local path="${tool_map[$name]}"
@@ -197,17 +198,6 @@ discover_tools() {
     schemas="$(echo "${schemas}" | jq --argjson s "${schema}" '. + [$s]')"
   done
   echo "${schemas}"
-}
-
-# Also export a lookup: tool name -> executable path
-declare -A TOOL_PATHS
-_build_tool_paths() {
-  _init_sources
-  TOOL_PATHS=()
-  local src
-  for src in "${_HARNESS_SOURCES[@]}"; do
-    _collect_tools_from "${src}/tools" TOOL_PATHS
-  done
 }
 
 _collect_tools_from() {
@@ -223,29 +213,42 @@ _collect_tools_from() {
 }
 
 # --------------------------------------------------------------------------- #
-#  Provider discovery                                                          #
+#  Provider discovery (unscoped — sees ALL providers)                          #
 # --------------------------------------------------------------------------- #
-find_provider() {
-  local name="$1"
-  _init_sources
-  # Search highest priority first (reverse of sources order)
-  local i
-  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
-    [[ -x "${_HARNESS_SOURCES[i]}/providers/${name}" ]] && {
-      echo "${_HARNESS_SOURCES[i]}/providers/${name}"
-      return 0
-    }
-  done
-  _log "provider '${name}' not found"
-  return 1
-}
-
-# List all discovered providers (name -> path, local overrides global)
 discover_providers() {
-  _init_sources
+  # Walk bundled plugins + .harness/ dirs WITHOUT provider scoping
+  local all_sources=()
+
+  local d
+  for d in "${HARNESS_ROOT}/plugins"/*/; do
+    [[ -d "${d}" ]] && all_sources+=("${d%/}")
+  done
+
+  local harness_dirs=()
+  local cur="${PWD}"
+  while true; do
+    [[ -d "${cur}/.harness" ]] && harness_dirs+=("${cur}/.harness")
+    [[ "${cur}" == "/" ]] && break
+    cur="$(dirname "${cur}")"
+  done
+  local found=0
+  for d in "${harness_dirs[@]:-}"; do
+    [[ "${d}" == "${HARNESS_HOME}" ]] && found=1
+  done
+  (( found )) || harness_dirs+=("${HARNESS_HOME}")
+
+  local i
+  for (( i=${#harness_dirs[@]}-1; i>=0; i-- )); do
+    local hd="${harness_dirs[i]}"
+    for d in "${hd}/plugins"/*/; do
+      [[ -d "${d}" ]] && all_sources+=("${d%/}")
+    done
+    all_sources+=("${hd}")
+  done
+
   declare -A prov_map
   local src
-  for src in "${_HARNESS_SOURCES[@]}"; do
+  for src in "${all_sources[@]}"; do
     local dir="${src}/providers"
     [[ -d "${dir}" ]] || continue
     local f
@@ -259,9 +262,21 @@ discover_providers() {
   done
 }
 
-# Auto-select provider and load its defaults for any unset HARNESS_ vars.
+find_provider() {
+  local name="$1"
+  _discover_sources
+  local i
+  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
+    [[ -x "${_HARNESS_SOURCES[i]}/providers/${name}" ]] && {
+      echo "${_HARNESS_SOURCES[i]}/providers/${name}"
+      return 0
+    }
+  done
+  _log "provider '${name}' not found"
+  return 1
+}
+
 _resolve_provider() {
-  # Auto-select: first discovered provider whose --ready exits 0
   if [[ -z "${HARNESS_PROVIDER}" ]]; then
     local name path
     while read -r name path; do
@@ -273,7 +288,6 @@ _resolve_provider() {
     done < <(discover_providers | sort)
   fi
   [[ -z "${HARNESS_PROVIDER}" ]] && return 0
-  # Load defaults from the selected provider
   local provider_path
   provider_path="$(find_provider "${HARNESS_PROVIDER}")" || return 0
   local key val
@@ -286,7 +300,7 @@ _resolve_provider() {
 }
 
 # --------------------------------------------------------------------------- #
-#  Session management                                                          #
+#  Session management                                                         #
 # --------------------------------------------------------------------------- #
 session_new() {
   local id
@@ -334,95 +348,100 @@ EOF
 }
 
 # --------------------------------------------------------------------------- #
-#  Main agent loop                                                             #
+#  Main agent loop — pure state machine                                       #
 # --------------------------------------------------------------------------- #
 agent_loop() {
   local session_dir="$1"
   export SESSION_DIR="${session_dir}"
 
-  _build_tool_paths
   [[ -z "${HARNESS_PROVIDER}" ]] && _die "no provider available. set HARNESS_PROVIDER or export an API key for a discovered provider."
-  local provider_bin
-  provider_bin="$(find_provider "${HARNESS_PROVIDER}")"
 
-  run_hooks on-start </dev/null || true
+  local state="start"
+  local context='{}'
+  local turns=0
+  local output=""
 
-  local turn=0
-  while (( turn < HARNESS_MAX_TURNS )); do
-    turn=$((turn + 1))
+  while true; do
+    _discover_sources
 
-    # Assemble request — the assemble hooks build the full API payload
-    local payload
-    payload="$(echo '{}' | run_hooks assemble)"
+    local result="" rc=0
+    result="$(echo "${context}" | run_hooks "${state}")" && rc=0 || rc=$?
 
-    # Send to provider
-    local response
-    response="$( echo "${payload}" | "${provider_bin}" 2>>"${HARNESS_LOG}" )"
-    local rc=$?
+    # Hook pipeline failure handling
     if (( rc != 0 )); then
-      echo "${response}" | run_hooks on-error </dev/null || true
-      _log "provider returned ${rc}, retrying in 5s..."
-      sleep 5
+      if [[ "${state}" == "error" ]]; then
+        break
+      fi
+      state="error"
+      context="${result}"
       continue
     fi
 
-    # Post-receive hooks (save, redact, etc.) — may mutate the response
-    response="$(echo "${response}" | run_hooks receive)" || true
+    # Extract control fields
+    local next_state=""
+    next_state="$(echo "${result}" | jq -r '.next_state // empty' 2>/dev/null)" || true
+    [[ -z "${next_state}" ]] && next_state="${DEFAULT_NEXT[${state}]:-}"
 
-    # Check for tool use
-    local stop_reason
-    stop_reason="$(echo "${response}" | jq -r '.stop_reason // "end_turn"')"
+    local items=""
+    items="$(echo "${result}" | jq -c '.items // empty' 2>/dev/null)" || true
 
-    if [[ "${stop_reason}" != "tool_use" ]]; then
-      (( turn > 1 )) && echo "" >&2
-      echo "${response}" | jq -r '.content[] | select(.type=="text") | .text' 2>/dev/null
+    # Strip control fields to get context for next state
+    context="$(echo "${result}" | jq -c 'del(.next_state, .items, .output)' 2>/dev/null)" || context='{}'
+    [[ -z "${context}" || "${context}" == "null" ]] && context='{}'
+
+    # Capture output for display at the end
+    local step_output=""
+    step_output="$(echo "${result}" | jq -r '.output // empty' 2>/dev/null)" || true
+    [[ -n "${step_output}" ]] && output="${step_output}"
+
+    # If current state is done, break (done hooks already ran)
+    if [[ "${state}" == "done" ]]; then
       break
     fi
 
-    # Extract and execute tool calls
-    local tool_calls
-    tool_calls="$(echo "${response}" | jq -c '.content[] | select(.type=="tool_use")')"
+    # Process items if present
+    if [[ -n "${items}" && "${items}" != "null" && "${items}" != "[]" ]]; then
+      local item_state="${next_state}"
+      local after_item="${DEFAULT_NEXT[${item_state}]:-}"
+      local item_count
+      item_count="$(echo "${items}" | jq 'length')"
 
-    while IFS= read -r tc; do
-      [[ -z "${tc}" ]] && continue
-      local tool_name tool_id tool_input
-      tool_name="$(echo "${tc}" | jq -r '.name')"
-      tool_id="$(echo "${tc}" | jq -r '.id')"
-      tool_input="$(echo "${tc}" | jq -c '.input')"
+      local idx
+      for (( idx=0; idx<item_count; idx++ )); do
+        local item
+        item="$(echo "${items}" | jq -c ".[${idx}]")"
 
-      # Find the tool executable
-      local tool_bin="${TOOL_PATHS[${tool_name}]:-}"
-      local result is_error="false"
+        _discover_sources
+        local item_result=""
+        item_result="$(echo "${item}" | run_hooks "${item_state}")" && true || true
 
-      if [[ -z "${tool_bin}" ]]; then
-        result="error: tool '${tool_name}' not found"
-        is_error="true"
-      else
-        # pre-tool hooks can abort (non-zero exit) or mutate the tool call
-        if tc="$(echo "${tc}" | run_hooks pre-tool 2>/dev/null)"; then
-          tool_input="$(echo "${tc}" | jq -c '.input')"
-          result="$(echo "${tool_input}" | "${tool_bin}" --exec 2>&1)" || is_error="true"
-        else
-          result="tool execution blocked by pre-tool hook"
-          is_error="true"
+        if [[ -n "${after_item}" ]]; then
+          _discover_sources
+          echo "${item_result}" | run_hooks "${after_item}" > /dev/null && true || true
         fi
-      fi
-      _display_tool "${tool_name}" "${tool_input}" "${result}" "${is_error}"
+      done
 
-      # post-tool hooks (save result, etc.) — may mutate the result
-      jq -n --arg id "${tool_id}" --arg name "${tool_name}" \
-            --arg result "${result}" --arg is_error "${is_error}" \
-            --argjson input "${tool_input}" \
-        '{tool_use_id: $id, name: $name, input: $input, result: $result, is_error: ($is_error == "true")}' \
-        | run_hooks tool-done >/dev/null || true
+      state="assemble"
+      context='{}'
+    else
+      state="${next_state}"
+    fi
 
-    done <<< "${tool_calls}"
-
+    # Count turns when entering send
+    if [[ "${state}" == "send" ]]; then
+      turns=$((turns + 1))
+    fi
+    if (( turns > HARNESS_MAX_TURNS )); then
+      break
+    fi
   done
 
-  run_hooks on-end </dev/null || true
+  # Print output
+  if [[ -n "${output}" ]]; then
+    printf '%s\n' "${output}"
+  fi
 
-  if (( turn >= HARNESS_MAX_TURNS )); then
+  if (( turns > HARNESS_MAX_TURNS )); then
     _log "hit max turns (${HARNESS_MAX_TURNS})"
   fi
 }
@@ -432,32 +451,6 @@ agent_loop() {
 # --------------------------------------------------------------------------- #
 _log() {
   echo "[harness] $*" >> "${HARNESS_LOG}"
-}
-
-_display_tool() {
-  local name="$1" input="$2" result="$3" is_error="$4"
-  local max_lines=30
-  {
-    printf '\n── %s ' "${name}"
-    printf '─%.0s' {1..40}
-    echo ""
-    # Input: for bash show the command, for others show key=value pairs
-    if [[ "${name}" == "bash" ]]; then
-      echo "${input}" | jq -r '.command // empty'
-    else
-      echo "${input}" | jq -r 'to_entries[] | "  \(.key)=\(.value)"'
-    fi
-    # Result
-    local line_count
-    line_count="$(printf '%s' "${result}" | wc -l)"
-    if (( line_count > max_lines )); then
-      printf '%s\n' "${result}" | head -"${max_lines}" | sed 's/^/  /'
-      printf '  ... (%d more lines)\n' "$(( line_count - max_lines ))"
-    else
-      printf '%s\n' "${result}" | sed 's/^/  /'
-    fi
-    [[ "${is_error}" == "true" ]] && echo "  (error)" || true
-  } >> "${HARNESS_LOG}"
 }
 
 _die() {
@@ -474,7 +467,6 @@ _require() {
 # --------------------------------------------------------------------------- #
 cmd_run() {
   local message=""
-  # Collect message from args or stdin
   if (( $# > 0 )); then
     message="$*"
   elif [[ ! -t 0 ]]; then
@@ -551,9 +543,14 @@ cmd_session() {
 }
 
 cmd_tools() {
-  _build_tool_paths
-  for name in "${!TOOL_PATHS[@]}"; do
-    local path="${TOOL_PATHS[$name]}"
+  _discover_sources
+  declare -A tool_map
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    _collect_tools_from "${src}/tools" tool_map
+  done
+  for name in "${!tool_map[@]}"; do
+    local path="${tool_map[$name]}"
     local desc=""
     desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
     printf '  %-20s %s  [%s]\n' "${name}" "${desc}" "${path}"
@@ -562,7 +559,7 @@ cmd_tools() {
 
 cmd_hooks() {
   local stage="${1:-}"
-  _init_sources
+  _discover_sources
   local search_dirs=()
   local src
   for src in "${_HARNESS_SOURCES[@]}"; do
@@ -611,7 +608,6 @@ environment:
   HARNESS_MAX_TURNS        max agent loop iterations (100)
 EOF
 
-  # Dynamic: discovered providers with env vars
   echo ""
   echo "providers (discovered):"
   local name path desc envline
@@ -624,12 +620,16 @@ EOF
     done < <("${path}" --env 2>/dev/null || true)
   done < <(discover_providers)
 
-  # Dynamic: discovered tools
   echo ""
   echo "tools (discovered):"
-  _build_tool_paths
-  for name in "${!TOOL_PATHS[@]}"; do
-    path="${TOOL_PATHS[$name]}"
+  _discover_sources
+  declare -A tool_map
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    _collect_tools_from "${src}/tools" tool_map
+  done
+  for name in "${!tool_map[@]}"; do
+    path="${tool_map[$name]}"
     desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
     printf '  %-20s %s\n' "${name}" "${desc}"
   done

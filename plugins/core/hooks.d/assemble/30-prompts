@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 # 30-prompts — load system prompt content from the filesystem.
 #
-# Walks .harness/ dirs from most-global to most-local, collecting:
-#   1. HARNESS.md files (analogous to CLAUDE.md)
-#   2. All .md files in prompts/ subdirectories
-#
-# Most-global content appears first in the prompt; most-local last
-# (so project-specific instructions naturally override/amend general ones).
+# Iterates HARNESS_SOURCES (global first = lowest priority first in the list),
+# collecting HARNESS.md files and prompts/*.md from each source.
 # The baked-in HARNESS_SYSTEM from env is always the very first block.
 set -euo pipefail
 
@@ -16,34 +12,15 @@ system_parts=()
 # Start with the baked-in system prompt
 system_parts+=("${HARNESS_SYSTEM}")
 
-# Walk .harness/ dirs from CWD upward, collect paths
-harness_dirs=()
-cur="${PWD}"
-while true; do
-  [[ -d "${cur}/.harness" ]] && harness_dirs+=("${cur}/.harness")
-  [[ "${cur}" == "/" ]] && break
-  cur="$(dirname "${cur}")"
-done
+# Iterate HARNESS_SOURCES (global first = lowest priority first)
+IFS=':' read -ra sources <<< "${HARNESS_SOURCES}"
+for src in "${sources[@]}"; do
+  # HARNESS.md at the root of this source
+  [[ -f "${src}/HARNESS.md" ]] && system_parts+=("$(cat "${src}/HARNESS.md")")
 
-# Ensure home dir is present
-home_found=0
-for d in "${harness_dirs[@]:-}"; do
-  [[ "${d}" == "${HOME}/.harness" ]] && home_found=1
-done
-(( home_found )) || harness_dirs+=("${HOME}/.harness")
-
-# Process in reverse order (most-global first)
-for (( i=${#harness_dirs[@]}-1; i>=0; i-- )); do
-  d="${harness_dirs[i]}"
-
-  # HARNESS.md at the root of the .harness/ dir
-  if [[ -f "${d}/HARNESS.md" ]]; then
-    system_parts+=("$(cat "${d}/HARNESS.md")")
-  fi
-
-  # All .md files in prompts/ sorted alphabetically
-  if [[ -d "${d}/prompts" ]]; then
-    for f in $(ls -1 "${d}/prompts/"*.md 2>/dev/null | sort); do
+  # All .md files in prompts/ sorted
+  if [[ -d "${src}/prompts" ]]; then
+    for f in $(ls -1 "${src}/prompts/"*.md 2>/dev/null | sort); do
       system_parts+=("$(cat "${f}")")
     done
   fi

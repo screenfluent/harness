@@ -5,52 +5,18 @@ set -euo pipefail
 
 payload="$(cat)"
 
-# Reuse the harness tool discovery via the same dir-walking logic.
-# We replicate the discovery here to stay self-contained (no dependency
-# on the parent process's in-memory state).
-
-_collect() {
-  local dir="$1"
-  [[ -d "${dir}" ]] || return 0
-  for f in "${dir}"/*; do
-    [[ -x "${f}" ]] || continue
-    echo "${f}"
-  done
-}
-
-# Walk .harness/ dirs from CWD upward
+# Iterate HARNESS_SOURCES (colon-separated, lowest priority first, highest last).
+# Later entries override earlier ones (same basename = higher priority wins).
+IFS=':' read -ra sources <<< "${HARNESS_SOURCES}"
 declare -A tool_map
-cur="${PWD}"
-while true; do
-  if [[ -d "${cur}/.harness/tools" ]]; then
-    while IFS= read -r f; do
-      [[ -z "$f" ]] && continue
-      local_name="$(basename "$f")"
-      # Most-local wins — don't overwrite if already set
-      [[ -z "${tool_map[$local_name]:-}" ]] && tool_map["$local_name"]="$f"
-    done < <(_collect "${cur}/.harness/tools")
-  fi
-  [[ "${cur}" == "/" ]] && break
-  cur="$(dirname "${cur}")"
+for src in "${sources[@]}"; do
+  [[ -d "${src}/tools" ]] || continue
+  for f in "${src}/tools"/*; do
+    [[ -x "${f}" ]] || continue
+    name="$(basename "${f}")"
+    tool_map["${name}"]="${f}"
+  done
 done
-
-# Home dir
-if [[ -d "${HOME}/.harness/tools" ]]; then
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    local_name="$(basename "$f")"
-    [[ -z "${tool_map[$local_name]:-}" ]] && tool_map["$local_name"]="$f"
-  done < <(_collect "${HOME}/.harness/tools")
-fi
-
-# Core tools (lowest priority)
-if [[ -d "${HARNESS_ROOT}/plugins/core/tools" ]]; then
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
-    local_name="$(basename "$f")"
-    [[ -z "${tool_map[$local_name]:-}" ]] && tool_map["$local_name"]="$f"
-  done < <(_collect "${HARNESS_ROOT}/plugins/core/tools")
-fi
 
 # Collect schemas
 tools="[]"

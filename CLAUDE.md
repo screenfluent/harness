@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Harness is a minimal agent loop in bash. The core script (~550 lines) handles plugin discovery, hook dispatch, and the agentic loop. Everything else — tools, providers, prompt loading, message serialization, cost tracking, approval gates — lives in plugins that can be written in any language.
+Harness is a minimal agent loop in bash. The core script (~670 lines) is a pure state machine that handles plugin discovery, hook dispatch, and state transitions. Everything else — message assembly, API calls, response parsing, tool execution, prompt loading, cost tracking, approval gates — lives in hooks and plugins that can be written in any language.
 
 Dependencies: bash 4+, jq, curl. No package manager, no language runtime.
 
@@ -30,39 +30,51 @@ The `bin/hs` symlink is an alias for `bin/harness`.
 
 ## Architecture
 
-### The Loop
+### The State Machine
 
-`assemble → send → receive → (execute tools → save results → repeat) → done`
+The core loop is a pure state machine. It dispatches hooks for the current state, reads control fields (`next_state`, `items`, `output`) from the hook output, and transitions. It has no provider-specific knowledge.
 
-The core loop in `bin/harness` orchestrates this. It does not implement message assembly, tool execution, prompt loading, or response saving — hooks do all of that.
+```
+start → assemble → send → receive → done
+                    ↑                  │
+                    │   tool_exec → tool_done
+                    │                  │
+                    └──────────────────┘
+```
 
-### Plugin Discovery
+Discovery is fully dynamic — plugins are rediscovered every loop iteration, so tools and hooks can be added/removed at runtime.
 
-Harness walks from CWD upward to `/`, collecting `.harness/` directories. Local overrides global by basename. Core plugins in `plugins/core/` are always loaded last (lowest priority).
+### Plugin Discovery & Provider Scoping
+
+Harness walks from CWD upward to `/`, collecting `.harness/` directories. Local overrides global by basename. Bundled plugins in `plugins/*/` are loaded at lowest priority.
+
+**Provider plugins** — any plugin directory containing a `providers/` subdirectory — are scoped: only the active provider's plugin is loaded. This means `plugins/anthropic/` hooks only participate when `HARNESS_PROVIDER=anthropic`. Non-provider plugins (like `plugins/core/`) always participate.
 
 ### Four Plugin Types
 
 **Tools** (`tools/`): Executables responding to `--schema`, `--describe`, `--exec`. Input is JSON on stdin via `--exec`, output on stdout. Language-agnostic. Core tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`.
 
-**Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `on-start`, `assemble`, `pre-tool`, `receive`, `tool-done`, `on-error`, `on-end`.
+**Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `start`, `assemble`, `send`, `receive`, `tool_exec`, `tool_done`, `error`, `done`.
 
 **Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `zai`.
 
 **Prompts** (`HARNESS.md` + `prompts/*.md`): Concatenated into the system prompt by the `30-prompts` assemble hook. Global first, local last.
 
+### Canonical Message Format
+
+Session messages use a provider-agnostic format. Provider-specific hooks translate to/from this format, enabling mid-session provider switching. Key fields: `tool_call` (not tool_use), `call_id` (not tool_use_id), `stop: end|tool_calls|length|error` (normalized), `error` (not is_error).
+
 ### Session State is Filesystem
 
-Session storage is auto-discovered: harness walks from CWD upward looking for the first `.harness/sessions/` directory. If none is found, it falls back to `~/.harness/sessions/`. Create `<project>/.harness/sessions/` to keep session history local to a repo. Override with `HARNESS_SESSIONS`.
-
-Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with YAML frontmatter. The `10-messages` assemble hook reconstructs the API messages array from these files. Tool calls within assistant messages are stored as fenced code blocks with `tool_use` info strings.
+Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with YAML frontmatter. Tool calls are stored as fenced code blocks with `tool_call` info strings.
 
 ### Key Files
 
-- `bin/harness` — entire core: CLI, discovery, loop, tool execution
-- `plugins/core/hooks.d/assemble/` — payload construction (messages, tools, prompts)
-- `plugins/core/hooks.d/receive/10-save` — response persistence
-- `plugins/core/hooks.d/tool-done/10-save` — tool result persistence
-- `plugins/core/providers/anthropic` — API call (curl + jq)
+- `bin/harness` — core: CLI, discovery, state machine (no provider-specific code)
+- `plugins/core/hooks.d/` — provider-agnostic hooks (send, tool_exec, tool_done, assemble/tools, assemble/prompts)
+- `plugins/anthropic/hooks.d/` — Anthropic-specific hooks (assemble/messages, receive/save)
+- `plugins/anthropic/providers/anthropic` — Anthropic API call
+- `plugins/zai/` — z.ai provider (Anthropic-compatible, hooks symlinked to anthropic)
 - `plugins/core/tools/` — five built-in tools
 
 ## Conventions
@@ -73,5 +85,6 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 - Hook naming: `NN-name` where NN is a two-digit sort key
 - Tool protocol: `--schema` (JSON), `--describe` (one-line), `--exec` (JSON stdin → stdout)
 - Provider protocol: `--describe`, `--ready`, `--defaults`, `--env`, plus stdin→stdout for execution
+- Hooks receive `HARNESS_SOURCES` (colon-separated active source dirs) for plugin discovery
 - Full protocol docs in `docs/PROTOCOLS.md`
 - `HARNESS_CWD` tracks the session's original working directory; tools use it

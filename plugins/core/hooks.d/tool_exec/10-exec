@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# 10-exec — execute a single tool call.
+# Receives tool call JSON on stdin: {id, name, input}.
+# Returns tool result JSON: {call_id, name, input, result, error}.
+set -euo pipefail
+
+data="$(cat)"
+call_id="$(echo "${data}" | jq -r '.id')"
+tool_name="$(echo "${data}" | jq -r '.name')"
+input="$(echo "${data}" | jq -c '.input')"
+
+# Source session env if available (picks up HARNESS_CWD etc.)
+if [[ -f "${HARNESS_SESSION}/.env" ]]; then
+  set -a
+  source "${HARNESS_SESSION}/.env"
+  set +a
+fi
+
+# Discover tool binary from HARNESS_SOURCES (highest priority = last in list)
+tool_bin=""
+IFS=':' read -ra sources <<< "${HARNESS_SOURCES}"
+for (( i=${#sources[@]}-1; i>=0; i-- )); do
+  candidate="${sources[i]}/tools/${tool_name}"
+  if [[ -x "${candidate}" ]]; then
+    tool_bin="${candidate}"
+    break
+  fi
+done
+
+result=""
+error=false
+
+if [[ -z "${tool_bin}" ]]; then
+  result="error: tool '${tool_name}' not found"
+  error=true
+else
+  workdir="${HARNESS_CWD:-${PWD}}"
+  if result="$(cd "${workdir}" && echo "${input}" | "${tool_bin}" --exec 2>&1)"; then
+    error=false
+  else
+    error=true
+  fi
+fi
+
+# Display tool execution to log
+{
+  printf '── %s ' "${tool_name}"
+  printf '─%.0s' $(seq 1 $(( 50 - ${#tool_name} )))
+  printf '\n'
+
+  if [[ "${tool_name}" == "bash" ]]; then
+    echo "${input}" | jq -r '.command // empty' | sed 's/^/  /'
+  else
+    echo "${input}" | jq -r 'to_entries[] | "  \(.key)=\(.value)"'
+  fi
+
+  total_lines="$(printf '%s' "${result}" | wc -l)"
+  if (( total_lines > 30 )); then
+    printf '%s\n' "${result}" | head -30 | sed 's/^/  /'
+    printf '  ... (%d more lines)\n' $(( total_lines - 30 ))
+  else
+    printf '%s\n' "${result}" | sed 's/^/  /'
+  fi
+
+  [[ "${error}" == "true" ]] && echo "  (error)" || true
+} >> "${HARNESS_LOG}" 2>/dev/null || true
+
+# Return result JSON
+jq -n \
+  --arg call_id "${call_id}" \
+  --arg name "${tool_name}" \
+  --argjson input "${input}" \
+  --arg result "${result}" \
+  --argjson error "${error}" \
+  '{call_id: $call_id, name: $name, input: $input, result: $result, error: $error}'

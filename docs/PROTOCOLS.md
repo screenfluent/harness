@@ -14,7 +14,7 @@ Tools are executables in `tools/` directories. They respond to three flags:
 
 ### `--schema`
 
-Returns a JSON object matching the Anthropic tool schema format:
+Returns a JSON object with the tool definition:
 
 ```json
 {
@@ -32,7 +32,7 @@ Returns a JSON object matching the Anthropic tool schema format:
 
 ### `--exec`
 
-Receives `input_schema`-shaped JSON on stdin. Stdout becomes the tool result sent back to the model. Stderr goes to `HARNESS_LOG`. A non-zero exit marks the result as `is_error: true`.
+Receives `input_schema`-shaped JSON on stdin. Stdout becomes the tool result sent back to the model. Stderr goes to `HARNESS_LOG`. A non-zero exit marks the result as `error: true`.
 
 ### Environment
 
@@ -62,6 +62,12 @@ esac
 ## Providers
 
 Providers are executables in `providers/` directories. They handle API communication with an LLM backend.
+
+### Provider plugins
+
+A plugin directory that contains a `providers/` subdirectory is a **provider plugin**. During discovery, provider plugins are skipped unless their directory basename matches the active `HARNESS_PROVIDER`. This means only the active provider's hooks, tools, and prompts participate in the session.
+
+Non-provider plugins (directories without `providers/`) always participate regardless of the active provider.
 
 ### Execution mode
 
@@ -138,23 +144,46 @@ Hooks are executables in `hooks.d/<stage>/` directories. They form a pipeline: e
 
 ### Pipeline behavior
 
-1. Hooks are collected from all plugin sources (lowest to highest priority)
+1. Hooks are collected from all active plugin sources (lowest to highest priority)
 2. Deduplicated by basename — a local `10-save` overrides a bundled `10-save`
 3. Sorted by basename (numeric prefix determines order)
 4. Executed as a chain: stdin of hook N = stdout of hook N-1
 5. Non-zero exit aborts the chain and returns the error to the caller
 
+### State machine
+
+The agent loop is a state machine. Each state dispatches hooks for that stage, then reads control fields from the pipeline output to determine the next state.
+
+**Default transitions:**
+
+```
+start → assemble → send → receive → done
+                     ↑                 │
+                     │    tool_exec → tool_done
+                     │                 │
+                     └─────────────────┘
+```
+
+Hook output is JSON. Any hook can set these optional control fields:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `next_state` | string | Override the default state transition |
+| `items` | array | Iterate each item through the next state (e.g., tool calls) |
+| `output` | string | Text to display to the user when reaching `done` |
+
 ### Stages
 
-| Stage | Stdin | When | Purpose |
-|-------|-------|------|---------|
-| `on-start` | empty | session begins | initialize session env |
-| `assemble` | `{}` | before each API call | build the request payload (messages, tools, prompts) |
-| `receive` | API response JSON | after API response | save assistant message, display output |
-| `pre-tool` | tool_use JSON | before tool execution | approve/reject/modify tool calls |
-| `tool-done` | tool result JSON | after tool execution | save tool results |
-| `on-error` | API response JSON | on API error | error handling |
-| `on-end` | empty | session ends | cleanup |
+| Stage | Stdin | Default next | Purpose |
+|-------|-------|--------------|---------|
+| `start` | `{}` | `assemble` | Initialize session env |
+| `assemble` | `{}` | `send` | Build the request payload (messages, tools, prompts) |
+| `send` | payload JSON | `receive` | Call the provider |
+| `receive` | API response | `done` | Save assistant message, extract tool calls |
+| `tool_exec` | tool call JSON | `tool_done` | Execute a single tool call |
+| `tool_done` | tool result JSON | `assemble` | Save tool result |
+| `error` | context JSON | `done` | Handle errors |
+| `done` | context JSON | — | Cleanup (terminal) |
 
 ### Environment
 
@@ -168,36 +197,62 @@ Every hook receives:
 | `HARNESS_PROVIDER` | selected provider name |
 | `HARNESS_SYSTEM` | base system prompt |
 | `HARNESS_ROOT` | harness installation directory |
+| `HARNESS_SOURCES` | colon-separated list of active plugin source directories |
+| `HARNESS_LOG` | log file path |
 
-### `pre-tool` specifics
+### `receive` specifics
 
-Receives the tool_use block as JSON on stdin:
-
-```json
-{"type": "tool_use", "id": "toolu_...", "name": "bash", "input": {"command": "ls"}}
-```
-
-Exit 0 to allow execution, non-zero to block it.
-
-### `tool-done` specifics
-
-Receives a JSON object on stdin:
+The receive hook is provider-specific. It parses the raw API response and returns control JSON. For responses with tool calls:
 
 ```json
 {
-  "tool_use_id": "toolu_...",
-  "name": "bash",
-  "input": {"command": "ls"},
-  "result": "file1\nfile2\n",
-  "is_error": false
+  "next_state": "tool_exec",
+  "items": [
+    {"id": "call_abc", "name": "bash", "input": {"command": "ls"}}
+  ]
 }
 ```
 
-### Example
+For final responses:
+
+```json
+{
+  "next_state": "done",
+  "output": "The model's text response"
+}
+```
+
+### `tool_exec` specifics
+
+Receives a single tool call as JSON:
+
+```json
+{"id": "call_abc", "name": "bash", "input": {"command": "ls"}}
+```
+
+Returns a tool result:
+
+```json
+{
+  "call_id": "call_abc",
+  "name": "bash",
+  "input": {"command": "ls"},
+  "result": "file1\nfile2\n",
+  "error": false
+}
+```
+
+Early hooks in the `tool_exec` pipeline (e.g., `05-approve`) can abort execution by exiting non-zero, replacing the old `pre-tool` stage.
+
+### `tool_done` specifics
+
+Receives the tool result JSON (same shape as `tool_exec` output). Saves it as a canonical message file.
+
+### Example: approval hook
 
 ```bash
 #!/usr/bin/env bash
-# hooks.d/pre-tool/50-confirm — ask before running bash commands
+# hooks.d/tool_exec/05-confirm — ask before running bash commands
 set -euo pipefail
 
 tc="$(cat)"
@@ -212,13 +267,67 @@ fi
 echo "${tc}"
 ```
 
+## Canonical message format
+
+Session messages are stored as markdown files with YAML frontmatter. The format is provider-agnostic — provider-specific hooks translate to/from this format.
+
+### Assistant messages
+
+```markdown
+---
+role: assistant
+seq: 0002
+timestamp: 2026-03-24T16:05:32-04:00
+model: claude-sonnet-4-20250514
+provider: anthropic
+stop: tool_calls
+tokens_in: 1200
+tokens_out: 350
+---
+Here's some text
+
+​```tool_call id=call_abc name=bash
+{"command": "ls"}
+​```
+```
+
+The `stop` field uses normalized values: `end`, `tool_calls`, `length`, `error`.
+
+### Tool result messages
+
+```markdown
+---
+role: tool_result
+seq: 0003
+timestamp: 2026-03-24T16:05:33-04:00
+call_id: call_abc
+tool: bash
+error: false
+---
+file1
+file2
+```
+
+### User messages
+
+```markdown
+---
+role: user
+seq: 0001
+timestamp: 2026-03-24T16:05:30-04:00
+---
+List the files
+```
+
 ## Discovery order
 
 Plugin sources are searched lowest to highest priority:
 
-1. Bundled plugins (`<harness-root>/plugins/*/`, sorted)
+1. Bundled plugins (`<harness-root>/plugins/*/`, sorted) — **provider plugins filtered by active provider**
 2. For each `.harness/` dir from global (`~/.harness`) to local (CWD):
-   - Plugin packs within that dir (`plugins/*/`, sorted)
+   - Plugin packs within that dir (`plugins/*/`, sorted) — **provider plugins filtered**
    - The dir itself
 
 Within each type (tools, providers, hooks), later entries override earlier ones sharing the same basename. This means a local plugin always overrides a bundled one with the same name.
+
+Discovery is fully dynamic — the agent loop rediscovers all plugins on every iteration, so tools, hooks, and prompts can be added or removed at runtime.

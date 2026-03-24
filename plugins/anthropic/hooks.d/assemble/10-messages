@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 10-messages — assemble the messages array from session message files.
+# 10-messages — read canonical session files, produce Anthropic messages array.
 # Pipeline hook: receives partial payload on stdin, adds "messages" field.
 set -euo pipefail
 
@@ -22,8 +22,8 @@ flush_tool_results() {
 
 for f in $(ls -1 "${msg_dir}"/*.md 2>/dev/null | sort); do
   _role=""
-  _tool_use_id=""
-  _is_error="false"
+  _call_id=""
+  _error="false"
   in_fm=false
   body=""
   while IFS= read -r line; do
@@ -33,9 +33,9 @@ for f in $(ls -1 "${msg_dir}"/*.md 2>/dev/null | sort); do
     fi
     if ${in_fm}; then
       case "${line}" in
-        role:*)         _role="${line#role: }" ;;
-        tool_use_id:*)  _tool_use_id="${line#tool_use_id: }" ;;
-        is_error:*)     _is_error="${line#is_error: }" ;;
+        role:*)     _role="${line#role: }" ;;
+        call_id:*)  _call_id="${line#call_id: }" ;;
+        error:*)    _error="${line#error: }" ;;
       esac
     else
       body+="${line}"$'\n'
@@ -57,7 +57,7 @@ for f in $(ls -1 "${msg_dir}"/*.md 2>/dev/null | sort); do
       tool_id="" tool_name="" tool_body=""
 
       while IFS= read -r line; do
-        if [[ "${line}" =~ ^\`\`\`tool_use\ id=([^ ]+)\ name=([^ ]+) ]]; then
+        if [[ "${line}" =~ ^\`\`\`tool_call\ id=([^ ]+)\ name=([^ ]+) ]]; then
           if [[ -n "${current_text}" ]]; then
             content_blocks="$(echo "${content_blocks}" | jq --arg t "${current_text%$'\n'}" \
               '. + [{type: "text", text: $t}]')"
@@ -99,11 +99,11 @@ for f in $(ls -1 "${msg_dir}"/*.md 2>/dev/null | sort); do
       messages="$(echo "${messages}" | jq --argjson m "${msg}" '. + [$m]')"
       ;;
     tool_result)
-      if [[ "${_is_error}" == "true" ]]; then
-        tr="$(jq -n --arg id "${_tool_use_id}" --arg content "${body}" \
+      if [[ "${_error}" == "true" ]]; then
+        tr="$(jq -n --arg id "${_call_id}" --arg content "${body}" \
           '{type: "tool_result", tool_use_id: $id, content: $content, is_error: true}')"
       else
-        tr="$(jq -n --arg id "${_tool_use_id}" --arg content "${body}" \
+        tr="$(jq -n --arg id "${_call_id}" --arg content "${body}" \
           '{type: "tool_result", tool_use_id: $id, content: $content}')"
       fi
       tool_results="$(echo "${tool_results}" | jq --argjson tr "${tr}" '. + [$tr]')"

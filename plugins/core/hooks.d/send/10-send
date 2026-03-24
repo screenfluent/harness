@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# 10-send — call the active provider with the assembled payload.
+set -euo pipefail
+
+payload="$(cat)"
+
+# Find provider binary from active sources (highest priority first = last in list)
+provider_bin=""
+IFS=':' read -ra sources <<< "${HARNESS_SOURCES}"
+for (( i=${#sources[@]}-1; i>=0; i-- )); do
+  candidate="${sources[i]}/providers/${HARNESS_PROVIDER}"
+  if [[ -x "${candidate}" ]]; then
+    provider_bin="${candidate}"
+    break
+  fi
+done
+
+[[ -z "${provider_bin}" ]] && {
+  echo "provider '${HARNESS_PROVIDER}' not found" >&2
+  exit 1
+}
+
+echo "${payload}" | "${provider_bin}" 2>>"${HARNESS_LOG}"

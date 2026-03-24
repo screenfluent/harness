@@ -37,15 +37,15 @@ hs help
 
 ## How it works
 
-The core logic is about 550 lines. It does three things:
+The core is a pure state machine (~670 lines). It does three things:
 
-1. **Walks up from CWD** collecting every `.harness/` directory it finds, from the current project up to `$HOME`. Each can contain `tools/`, `hooks.d/`, `providers/`, `prompts/`, and a `HARNESS.md` file. Local directories override global ones by basename.
+1. **Discovers plugins** by walking from CWD up to `$HOME`, collecting `.harness/` directories and bundled plugin packs. Provider plugins are scoped — only the active provider's plugin participates. Discovery reruns every loop iteration, so plugins can be added/removed at runtime.
 
-2. **Runs hooks** at each stage of the loop. Hooks are executables sorted by numeric prefix. They chain as a pipeline — each hook's stdout feeds the next hook's stdin. Non-zero exit aborts the chain.
+2. **Dispatches hooks** at each state. Hooks are executables sorted by numeric prefix, chained as a pipeline. Hook output is JSON that may include control fields (`next_state`, `items`, `output`) to drive state transitions.
 
-3. **Loops**: assemble → send → receive → (extract tool calls → execute → save result → repeat) → done.
+3. **Transitions**: `start → assemble → send → receive → (tool_exec → tool_done → assemble) → done`.
 
-That's it. The loop is the only thing the core does. Message assembly, tool discovery, prompt loading, response saving, cost tracking — all of it is implemented as hooks that ship in `plugins/core/` but can be overridden or extended per-project.
+The loop has zero provider-specific knowledge. Message formats, API calls, response parsing — all of it lives in provider-specific hooks (`plugins/anthropic/`, `plugins/zai/`). Provider-agnostic behavior (tool execution, prompt loading, tool discovery) lives in `plugins/core/`.
 
 ## Plugin types
 
@@ -67,17 +67,18 @@ Built-in tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`.
 
 Executables in `hooks.d/<stage>/` directories. Stages:
 
-| Stage | Type | stdin | Purpose |
+| Stage | stdin | Default next | Purpose |
 |---|---|---|---|
-| `on-start` | event | (empty) | Session initialization |
-| `assemble` | pipeline | `{}` → full payload | Build the API request |
-| `pre-tool` | pipeline | tool call JSON | Gate or modify tool calls |
-| `receive` | pipeline | API response JSON | Process/save response |
-| `tool-done` | pipeline | tool result JSON | Process/save tool results |
-| `on-error` | event | error info | Handle errors |
-| `on-end` | event | (empty) | Cleanup |
+| `start` | `{}` | `assemble` | Session initialization |
+| `assemble` | `{}` | `send` | Build the API request payload |
+| `send` | payload JSON | `receive` | Call the provider |
+| `receive` | API response | `done` | Parse response, save message, extract tool calls |
+| `tool_exec` | tool call JSON | `tool_done` | Execute a single tool (approval hooks go here too) |
+| `tool_done` | tool result JSON | `assemble` | Save tool result |
+| `error` | context JSON | `done` | Handle errors |
+| `done` | context JSON | — | Cleanup (terminal) |
 
-Pipeline hooks chain: each receives the previous hook's stdout on stdin, transforms it, and writes to stdout. Event hooks are called for side effects; their stdout is discarded.
+All hooks chain as a pipeline: each receives the previous hook's stdout on stdin. Any hook can set `next_state` in its JSON output to override the default transition.
 
 Naming convention: `NN-name` where NN controls execution order. Examples:
 - `10-messages` — runs first in the assemble stage
@@ -97,7 +98,7 @@ my-provider --env       # list supported env vars with descriptions
 
 If `HARNESS_PROVIDER` is not set, harness auto-selects the first discovered provider whose `--ready` exits 0, and loads its `--defaults` for unset vars like `HARNESS_MODEL`.
 
-Built-in: `anthropic`, `zai`. Writing a new provider means mapping the payload format and calling a different endpoint — about 50 lines of bash.
+Built-in: `anthropic`, `zai`. Each lives in its own provider plugin directory (`plugins/anthropic/`, `plugins/zai/`) with provider-specific hooks for message assembly and response parsing. Writing a new provider means creating a plugin directory with the provider binary and format-translation hooks.
 
 See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plugin types.
 
@@ -119,8 +120,8 @@ See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plug
   tools/
     deploy                   # project-specific deploy tool
   hooks.d/
-    pre-tool/
-      10-approve             # require approval for this project
+    tool_exec/
+      05-approve             # require approval for this project
 ```
 
 When multiple `.harness/` directories exist in the path from CWD to `$HOME`, they all contribute. For hooks and tools with the same basename, the most-local one wins. For prompt content, everything is concatenated (global first, local last, so local instructions can refine global ones).
@@ -134,21 +135,21 @@ sessions/20260324-143022-12345/
   session.md                         # metadata (model, provider, cwd, timestamps)
   messages/
     0001-user.md                     # user message
-    0002-assistant.md                # assistant response (with tool_use blocks)
+    0002-assistant.md                # assistant response (with tool_call blocks)
     0003-tool_result.md              # tool execution result
     0004-tool_result.md              # (consecutive results grouped by assembler)
     0005-assistant.md                # continuation
 ```
 
-Each message file has YAML frontmatter with metadata (`role`, `seq`, `timestamp`, `model`, `stop_reason`, token counts) and a markdown body. Tool use blocks within assistant messages are stored as fenced code blocks:
+Each message file has YAML frontmatter with metadata (`role`, `seq`, `timestamp`, `model`, `provider`, `stop`, token counts) and a markdown body. The format is provider-agnostic — tool calls use `tool_call` (not provider-specific names), stop reasons are normalized (`end`, `tool_calls`, `length`, `error`):
 
 ````
-```tool_use id=toolu_abc123 name=bash
+```tool_call id=call_abc123 name=bash
 {"command": "ls -la"}
 ```
 ````
 
-The message assembler hook (`10-messages`) reconstitutes the API messages array from these files. Because the filesystem *is* the state, any tool — `grep`, `sed`, a text editor — can inspect or modify conversation history.
+Provider-specific assemble hooks (e.g., `plugins/anthropic/hooks.d/assemble/10-messages`) translate this canonical format into the provider's API message format. Because the filesystem *is* the state, you can switch providers mid-session and the message history just works.
 
 ## Environment
 
