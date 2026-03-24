@@ -6,7 +6,20 @@ HARNESS_VERSION="0.1.0"
 readonly HARNESS_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 # Overridable
 HARNESS_HOME="${HARNESS_HOME:-${HOME}/.harness}"
-HARNESS_SESSIONS="${HARNESS_SESSIONS:-${HARNESS_HOME}/sessions}"
+# Session store: walk up from CWD to find nearest .harness/sessions/, else ~/.harness/sessions
+if [[ -z "${HARNESS_SESSIONS:-}" ]]; then
+  _cur="${PWD}"
+  while true; do
+    if [[ -d "${_cur}/.harness/sessions" ]]; then
+      HARNESS_SESSIONS="${_cur}/.harness/sessions"
+      break
+    fi
+    [[ "${_cur}" == "/" ]] && break
+    _cur="$(dirname "${_cur}")"
+  done
+  HARNESS_SESSIONS="${HARNESS_SESSIONS:-${HARNESS_HOME}/sessions}"
+  unset _cur
+fi
 HARNESS_MODEL="${HARNESS_MODEL:-claude-sonnet-4-20250514}"
 HARNESS_PROVIDER="${HARNESS_PROVIDER:-anthropic}"
 HARNESS_MAX_TURNS="${HARNESS_MAX_TURNS:-100}"

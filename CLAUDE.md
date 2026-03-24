@@ -52,7 +52,9 @@ Harness walks from CWD upward to `/`, collecting `.harness/` directories. Local 
 
 ### Session State is Filesystem
 
-Sessions live in `~/.harness/sessions/<id>/messages/` as numbered markdown files with YAML frontmatter. The `10-messages` assemble hook reconstructs the API messages array from these files. Tool calls within assistant messages are stored as fenced code blocks with `tool_use` info strings.
+Session storage is auto-discovered: harness walks from CWD upward looking for the first `.harness/sessions/` directory. If none is found, it falls back to `~/.harness/sessions/`. Create `<project>/.harness/sessions/` to keep session history local to a repo. Override with `HARNESS_SESSIONS`.
+
+Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with YAML frontmatter. The `10-messages` assemble hook reconstructs the API messages array from these files. Tool calls within assistant messages are stored as fenced code blocks with `tool_use` info strings.
 
 ### Key Files
 

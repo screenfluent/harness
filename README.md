@@ -139,7 +139,7 @@ The message assembler hook (`10-messages`) reconstitutes the API messages array 
 | Variable | Default | Purpose |
 |---|---|---|
 | `HARNESS_HOME` | `~/.harness` | Base config directory |
-| `HARNESS_SESSIONS` | `$HARNESS_HOME/sessions` | Session storage |
+| `HARNESS_SESSIONS` | nearest `.harness/sessions/` up from CWD, else `$HARNESS_HOME/sessions` | Session storage (auto-discovered) |
 | `HARNESS_MODEL` | `claude-sonnet-4-20250514` | Model identifier |
 | `HARNESS_PROVIDER` | `anthropic` | Provider plugin name |
 | `HARNESS_MAX_TURNS` | `100` | Max loop iterations |
