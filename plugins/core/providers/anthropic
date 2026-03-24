@@ -3,6 +3,15 @@
 # Receives assembled payload JSON on stdin, outputs the API response.
 set -euo pipefail
 
+[[ "${1:-}" == "--describe" ]] && { echo "Anthropic Messages API"; exit 0; }
+[[ "${1:-}" == "--env" ]] && { cat <<'ENVEOF'
+ANTHROPIC_API_KEY     API key (required)
+ANTHROPIC_API_URL     API endpoint (https://api.anthropic.com/v1/messages)
+ANTHROPIC_API_VERSION API version (2023-06-01)
+ANTHROPIC_MAX_TOKENS  max response tokens (8192)
+ENVEOF
+exit 0; }
+
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY not set}"
 ANTHROPIC_API_URL="${ANTHROPIC_API_URL:-https://api.anthropic.com/v1/messages}"
 ANTHROPIC_API_VERSION="${ANTHROPIC_API_VERSION:-2023-06-01}"

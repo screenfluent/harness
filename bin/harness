@@ -240,6 +240,25 @@ find_provider() {
   return 1
 }
 
+# List all discovered providers (name -> path, local overrides global)
+discover_providers() {
+  _init_sources
+  declare -A prov_map
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    local dir="${src}/providers"
+    [[ -d "${dir}" ]] || continue
+    local f
+    for f in "${dir}"/*; do
+      [[ -x "${f}" ]] || continue
+      prov_map["$(basename "${f}")"]="${f}"
+    done
+  done
+  for name in "${!prov_map[@]}"; do
+    echo "${name} ${prov_map[$name]}"
+  done
+}
+
 # --------------------------------------------------------------------------- #
 #  Session management                                                          #
 # --------------------------------------------------------------------------- #
@@ -525,21 +544,46 @@ harness — minimal agent loop, maximum extensibility
 usage:
   hs run <message>         one-shot: create session, run to completion
   hs chat [session-id]     interactive REPL (new or resume session)
-  hs session list           list sessions
+  hs session list          list sessions
   hs session show <id>     inspect a session
   hs session dir [id]      print session directory path
-  hs tools                  list discovered tools
-  hs hooks [stage]          list discovered hooks
-  hs version                print version
-  hs help                   this message
+  hs tools                 list discovered tools
+  hs hooks [stage]         list discovered hooks
+  hs version               print version
+  hs help                  this message
 
 environment:
-  HARNESS_HOME              base directory (~/.harness)
-  HARNESS_MODEL             model to use (claude-sonnet-4-20250514)
-  HARNESS_PROVIDER          provider plugin name (anthropic)
-  HARNESS_MAX_TURNS         max agent loop iterations (100)
-  ANTHROPIC_API_KEY         API key for anthropic provider
+  HARNESS_HOME             base directory (~/.harness)
+  HARNESS_MODEL            model to use (claude-sonnet-4-20250514)
+  HARNESS_PROVIDER         provider plugin name (anthropic)
+  HARNESS_MAX_TURNS        max agent loop iterations (100)
+EOF
 
+  # Dynamic: discovered providers with env vars
+  echo ""
+  echo "providers (discovered):"
+  local name path desc envline
+  while read -r name path; do
+    [[ -z "${name}" ]] && continue
+    desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
+    printf '  %-20s %s\n' "${name}" "${desc}"
+    while IFS= read -r envline; do
+      [[ -n "${envline}" ]] && printf '    %s\n' "${envline}"
+    done < <("${path}" --env 2>/dev/null || true)
+  done < <(discover_providers)
+
+  # Dynamic: discovered tools
+  echo ""
+  echo "tools (discovered):"
+  _build_tool_paths
+  for name in "${!TOOL_PATHS[@]}"; do
+    path="${TOOL_PATHS[$name]}"
+    desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
+    printf '  %-20s %s\n' "${name}" "${desc}"
+  done
+
+  echo ""
+  cat <<'EOF'
 plugin dirs:
   .harness/ directories are discovered by walking from CWD up to /.
   each can contain: hooks.d/ tools/ providers/ plugins/

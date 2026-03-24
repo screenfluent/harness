@@ -3,6 +3,14 @@
 # Receives assembled payload JSON on stdin, outputs the API response.
 set -euo pipefail
 
+[[ "${1:-}" == "--describe" ]] && { echo "z.ai (Anthropic-compatible)"; exit 0; }
+[[ "${1:-}" == "--env" ]] && { cat <<'ENVEOF'
+ZAI_AUTH_TOKEN        auth token (required)
+ZAI_API_URL           API endpoint (https://api.z.ai/api/anthropic/v1/messages)
+ZAI_MAX_TOKENS        max response tokens (8192)
+ENVEOF
+exit 0; }
+
 ZAI_AUTH_TOKEN="${ZAI_AUTH_TOKEN:?ZAI_AUTH_TOKEN not set}"
 ZAI_API_URL="${ZAI_API_URL:-https://api.z.ai/api/anthropic/v1/messages}"
 ZAI_MAX_TOKENS="${ZAI_MAX_TOKENS:-${ANTHROPIC_MAX_TOKENS:-8192}}"
