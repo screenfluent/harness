@@ -350,7 +350,6 @@ agent_loop() {
   local turn=0
   while (( turn < HARNESS_MAX_TURNS )); do
     turn=$((turn + 1))
-    _log "turn ${turn}"
 
     # Assemble request — the assemble hooks build the full API payload
     local payload
@@ -367,15 +366,15 @@ agent_loop() {
       continue
     fi
 
-    # Post-receive hooks (save the response, log costs, etc.)
-    echo "${response}" | run_hooks receive || true
+    # Post-receive hooks (save, redact, etc.) — may mutate the response
+    response="$(echo "${response}" | run_hooks receive)" || true
 
     # Check for tool use
     local stop_reason
     stop_reason="$(echo "${response}" | jq -r '.stop_reason // "end_turn"')"
 
     if [[ "${stop_reason}" != "tool_use" ]]; then
-      # Print final text to stdout
+      (( turn > 1 )) && echo "" >&2
       echo "${response}" | jq -r '.content[] | select(.type=="text") | .text' 2>/dev/null
       break
     fi
@@ -391,8 +390,6 @@ agent_loop() {
       tool_id="$(echo "${tc}" | jq -r '.id')"
       tool_input="$(echo "${tc}" | jq -c '.input')"
 
-      _log "tool: ${tool_name} (${tool_id})"
-
       # Find the tool executable
       local tool_bin="${TOOL_PATHS[${tool_name}]:-}"
       local result is_error="false"
@@ -401,21 +398,23 @@ agent_loop() {
         result="error: tool '${tool_name}' not found"
         is_error="true"
       else
-        # pre-tool hooks can abort (non-zero exit)
-        if echo "${tc}" | run_hooks pre-tool 2>/dev/null; then
+        # pre-tool hooks can abort (non-zero exit) or mutate the tool call
+        if tc="$(echo "${tc}" | run_hooks pre-tool 2>/dev/null)"; then
+          tool_input="$(echo "${tc}" | jq -c '.input')"
           result="$(echo "${tool_input}" | "${tool_bin}" --exec 2>&1)" || is_error="true"
         else
           result="tool execution blocked by pre-tool hook"
           is_error="true"
         fi
       fi
+      _display_tool "${tool_name}" "${tool_input}" "${result}" "${is_error}"
 
-      # post-tool hooks (save result, etc.)
+      # post-tool hooks (save result, etc.) — may mutate the result
       jq -n --arg id "${tool_id}" --arg name "${tool_name}" \
             --arg result "${result}" --arg is_error "${is_error}" \
             --argjson input "${tool_input}" \
         '{tool_use_id: $id, name: $name, input: $input, result: $result, is_error: ($is_error == "true")}' \
-        | run_hooks tool-done || true
+        | run_hooks tool-done >/dev/null || true
 
     done <<< "${tool_calls}"
 
@@ -433,6 +432,32 @@ agent_loop() {
 # --------------------------------------------------------------------------- #
 _log() {
   echo "[harness] $*" >> "${HARNESS_LOG}"
+}
+
+_display_tool() {
+  local name="$1" input="$2" result="$3" is_error="$4"
+  local max_lines=30
+  {
+    printf '\n── %s ' "${name}"
+    printf '─%.0s' {1..40}
+    echo ""
+    # Input: for bash show the command, for others show key=value pairs
+    if [[ "${name}" == "bash" ]]; then
+      echo "${input}" | jq -r '.command // empty'
+    else
+      echo "${input}" | jq -r 'to_entries[] | "  \(.key)=\(.value)"'
+    fi
+    # Result
+    local line_count
+    line_count="$(printf '%s' "${result}" | wc -l)"
+    if (( line_count > max_lines )); then
+      printf '%s\n' "${result}" | head -"${max_lines}" | sed 's/^/  /'
+      printf '  ... (%d more lines)\n' "$(( line_count - max_lines ))"
+    else
+      printf '%s\n' "${result}" | sed 's/^/  /'
+    fi
+    [[ "${is_error}" == "true" ]] && echo "  (error)" || true
+  } >> "${HARNESS_LOG}"
 }
 
 _die() {
