@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# harness tools — list discovered tools
+set -euo pipefail
+
+case "${1:-}" in
+  --describe) echo "list discovered tools"; exit 0 ;;
+esac
+
+source "${HARNESS_ROOT}/bin/harness"
+
+_discover_sources
+declare -A tool_map
+for src in "${_HARNESS_SOURCES[@]}"; do
+  _collect_tools_from "${src}/tools" tool_map
+done
+for name in "${!tool_map[@]}"; do
+  path="${tool_map[$name]}"
+  desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
+  printf '  %-20s %s  [%s]\n' "${name}" "${desc}" "${path}"
+done

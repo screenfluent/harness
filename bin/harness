@@ -3,7 +3,8 @@
 set -euo pipefail
 
 HARNESS_VERSION="0.1.0"
-readonly HARNESS_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+readonly HARNESS_ROOT
 # Overridable
 HARNESS_HOME="${HARNESS_HOME:-${HOME}/.harness}"
 # Session store: walk up from CWD to find nearest .harness/sessions/, else ~/.harness/sessions
@@ -461,205 +462,45 @@ _require() {
 }
 
 # --------------------------------------------------------------------------- #
+#  Command discovery                                                           #
+# --------------------------------------------------------------------------- #
+# Commands are executables in commands/ directories within plugin sources.
+# Protocol: --describe returns one-line help text; otherwise executed with args.
+# Discovery follows the same source walk as tools/hooks: local overrides global.
+
+_find_command() {
+  local target="$1"
+  local result=""
+  local src
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    local f="${src}/commands/${target}"
+    [[ -x "$f" && -f "$f" ]] && result="$f"
+  done
+  echo "${result}"
+}
+
+# --------------------------------------------------------------------------- #
 #  CLI                                                                         #
 # --------------------------------------------------------------------------- #
-cmd_run() {
-  local message=""
-  if (( $# > 0 )); then
-    message="$*"
-  elif [[ ! -t 0 ]]; then
-    message="$(cat)"
-  else
-    _die "usage: harness run <message>"
-  fi
-
-  local session_dir
-  session_dir="$(session_new)"
-  _log "session: ${session_dir}"
-  echo "session: $(basename "${session_dir}")" >&2
-
-  save_user_message "${session_dir}" "${message}"
-  agent_loop "${session_dir}"
-}
-
-cmd_chat() {
-  local session_dir
-  if [[ -n "${1:-}" ]]; then
-    session_dir="${HARNESS_SESSIONS}/$1"
-    [[ -d "${session_dir}" ]] || _die "session '$1' not found"
-  else
-    session_dir="$(session_new)"
-    echo "session: $(basename "${session_dir}")" >&2
-  fi
-
-  while true; do
-    printf '\n\033[1;36mYou:\033[0m '
-    local input
-    IFS= read -r input || break
-    [[ -z "${input}" ]] && continue
-    [[ "${input}" == "/quit" || "${input}" == "/exit" ]] && break
-
-    if [[ "${input}" == "/session" ]]; then
-      echo "${session_dir}"
-      continue
-    fi
-
-    save_user_message "${session_dir}" "${input}"
-    printf '\033[1;33mAgent:\033[0m '
-    agent_loop "${session_dir}"
-    echo
-  done
-}
-
-cmd_session() {
-  local subcmd="${1:-list}"; shift || true
-  case "${subcmd}" in
-    list)
-      ls -1t "${HARNESS_SESSIONS}" 2>/dev/null || echo "(no sessions)"
-      ;;
-    show)
-      local id="${1:?usage: harness session show <id>}"
-      local dir="${HARNESS_SESSIONS}/${id}"
-      [[ -d "${dir}" ]] || _die "session '${id}' not found"
-      cat "${dir}/session.md"
-      echo "---"
-      echo "messages: $(ls -1 "${dir}/messages/" | wc -l)"
-      ls -1 "${dir}/messages/"
-      ;;
-    dir)
-      local id="${1:-}"
-      if [[ -n "${id}" ]]; then
-        echo "${HARNESS_SESSIONS}/${id}"
-      else
-        echo "${HARNESS_SESSIONS}"
-      fi
-      ;;
-    *)
-      _die "unknown session command: ${subcmd}"
-      ;;
-  esac
-}
-
-cmd_tools() {
-  _discover_sources
-  declare -A tool_map
-  local src
-  for src in "${_HARNESS_SOURCES[@]}"; do
-    _collect_tools_from "${src}/tools" tool_map
-  done
-  for name in "${!tool_map[@]}"; do
-    local path="${tool_map[$name]}"
-    local desc=""
-    desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
-    printf '  %-20s %s  [%s]\n' "${name}" "${desc}" "${path}"
-  done
-}
-
-cmd_hooks() {
-  local stage="${1:-}"
-  _discover_sources
-  local search_dirs=()
-  local src
-  for src in "${_HARNESS_SOURCES[@]}"; do
-    search_dirs+=("${src}/hooks.d")
-  done
-  for sd in "${search_dirs[@]}"; do
-    [[ -d "${sd}" ]] || continue
-    if [[ -n "${stage}" ]]; then
-      [[ -d "${sd}/${stage}" ]] || continue
-      for f in "${sd}/${stage}"/*; do
-        [[ -x "$f" ]] && echo "  ${stage}/$(basename "$f")  [$f]"
-      done
-    else
-      for stage_dir in "${sd}"/*/; do
-        [[ -d "${stage_dir}" ]] || continue
-        local sname="$(basename "${stage_dir}")"
-        for f in "${stage_dir}"*; do
-          [[ -x "$f" ]] && echo "  ${sname}/$(basename "$f")  [$f]"
-        done
-      done
-    fi
-  done
-}
-
-cmd_version() { echo "harness ${HARNESS_VERSION}"; }
-
-cmd_help() {
-  cat <<'EOF'
-harness — minimal agent loop, maximum extensibility
-
-usage:
-  hs run <message>         one-shot: create session, run to completion
-  hs chat [session-id]     interactive REPL (new or resume session)
-  hs session list          list sessions
-  hs session show <id>     inspect a session
-  hs session dir [id]      print session directory path
-  hs tools                 list discovered tools
-  hs hooks [stage]         list discovered hooks
-  hs version               print version
-  hs help                  this message
-
-environment:
-  HARNESS_HOME             base directory (~/.harness)
-  HARNESS_MODEL            model (auto from provider --defaults)
-  HARNESS_PROVIDER         provider (auto: first with credentials)
-  HARNESS_MAX_TURNS        max agent loop iterations (100)
-EOF
-
-  echo ""
-  echo "providers (discovered):"
-  local name path desc envline
-  while read -r name path; do
-    [[ -z "${name}" ]] && continue
-    desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
-    printf '  %-20s %s\n' "${name}" "${desc}"
-    while IFS= read -r envline; do
-      [[ -n "${envline}" ]] && printf '    %s\n' "${envline}"
-    done < <("${path}" --env 2>/dev/null || true)
-  done < <(discover_providers)
-
-  echo ""
-  echo "tools (discovered):"
-  _discover_sources
-  declare -A tool_map
-  local src
-  for src in "${_HARNESS_SOURCES[@]}"; do
-    _collect_tools_from "${src}/tools" tool_map
-  done
-  for name in "${!tool_map[@]}"; do
-    path="${tool_map[$name]}"
-    desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
-    printf '  %-20s %s\n' "${name}" "${desc}"
-  done
-
-  echo ""
-  cat <<'EOF'
-plugin dirs:
-  .harness/ directories are discovered by walking from CWD up to /.
-  each can contain: hooks.d/ tools/ providers/ plugins/
-  bundled plugins live in <harness-root>/plugins/*/
-  plugin packs in .harness/plugins/*/ follow the same layout.
-  local dirs override global ones (by basename).
-EOF
-}
-
 main() {
   _require jq
   _require curl
   mkdir -p "${HARNESS_HOME}" "${HARNESS_SESSIONS}"
   _resolve_provider
+  _discover_sources
+
+  # Export env vars so command scripts inherit them
+  export HARNESS_ROOT HARNESS_HOME HARNESS_SESSIONS HARNESS_PROVIDER
+  export HARNESS_MODEL HARNESS_MAX_TURNS HARNESS_LOG HARNESS_VERSION
 
   local cmd="${1:-help}"; shift || true
-  case "${cmd}" in
-    run)     cmd_run "$@" ;;
-    chat)    cmd_chat "$@" ;;
-    session) cmd_session "$@" ;;
-    tools)   cmd_tools "$@" ;;
-    hooks)   cmd_hooks "$@" ;;
-    version) cmd_version ;;
-    help|--help|-h) cmd_help ;;
-    *)       _die "unknown command: ${cmd}. try 'harness help'" ;;
-  esac
+  # Normalize --help/-h to help
+  case "${cmd}" in --help|-h) cmd="help" ;; esac
+
+  local cmd_path
+  cmd_path="$(_find_command "${cmd}")"
+  [[ -n "${cmd_path}" ]] || _die "unknown command: ${cmd}. try 'harness help'"
+  exec "${cmd_path}" "$@"
 }
 
 # Only run main when executed directly, not when sourced

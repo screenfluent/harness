@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# harness help — show usage, discovered commands, providers, tools, and plugin info
+set -euo pipefail
+
+case "${1:-}" in
+  --describe) echo "show usage and discovered plugins"; exit 0 ;;
+esac
+
+source "${HARNESS_ROOT}/bin/harness"
+
+cat <<'EOF'
+harness — minimal agent loop, maximum extensibility
+
+usage:
+  hs run <message>         one-shot: create session, run to completion
+  hs chat [session-id]     interactive REPL (new or resume session)
+  hs session <sub> [args]  manage sessions (list, show <id>, dir [id])
+  hs tools                 list discovered tools
+  hs hooks [stage]         list discovered hooks
+  hs version               print version
+  hs help                  this message
+EOF
+
+# Discover plugin-added commands beyond the built-ins
+_discover_sources
+declare -A cmd_map
+local_cmds=()
+for src in "${_HARNESS_SOURCES[@]}"; do
+  [[ -d "${src}/commands" ]] || continue
+  for f in "${src}/commands"/*; do
+    [[ -x "${f}" && -f "${f}" ]] || continue
+    cmd_map["$(basename "${f}")"]="${f}"
+  done
+done
+# Show any commands not already listed in the usage block
+builtin_cmds="run chat session tools hooks version help"
+for name in $(printf '%s\n' "${!cmd_map[@]}" | sort); do
+  [[ " ${builtin_cmds} " == *" ${name} "* ]] && continue
+  path="${cmd_map[$name]}"
+  desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
+  local_cmds+=("$(printf '  %-20s %s' "${name}" "${desc}")")
+done
+if (( ${#local_cmds[@]} > 0 )); then
+  echo ""
+  echo "plugin commands:"
+  printf '%s\n' "${local_cmds[@]}"
+fi
+
+echo ""
+echo "environment:"
+cat <<'EOF'
+  HARNESS_HOME             base directory (~/.harness)
+  HARNESS_MODEL            model (auto from provider --defaults)
+  HARNESS_PROVIDER         provider (auto: first with credentials)
+  HARNESS_MAX_TURNS        max agent loop iterations (100)
+EOF
+
+echo ""
+echo "providers (discovered):"
+while read -r name path; do
+  [[ -z "${name}" ]] && continue
+  desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
+  printf '  %-20s %s\n' "${name}" "${desc}"
+  while IFS= read -r envline; do
+    [[ -n "${envline}" ]] && printf '    %s\n' "${envline}"
+  done < <("${path}" --env 2>/dev/null || true)
+done < <(discover_providers)
+
+echo ""
+echo "tools (discovered):"
+declare -A tool_map
+for src in "${_HARNESS_SOURCES[@]}"; do
+  _collect_tools_from "${src}/tools" tool_map
+done
+for name in "${!tool_map[@]}"; do
+  path="${tool_map[$name]}"
+  desc="$("${path}" --describe 2>/dev/null)" || desc="(no description)"
+  printf '  %-20s %s\n' "${name}" "${desc}"
+done
+
+echo ""
+cat <<'EOF'
+plugin dirs:
+  .harness/ directories are discovered by walking from CWD up to /.
+  each can contain: commands/ hooks.d/ tools/ providers/ plugins/
+  bundled plugins live in <harness-root>/plugins/*/
+  plugin packs in .harness/plugins/*/ follow the same layout.
+  local dirs override global ones (by basename).
+EOF

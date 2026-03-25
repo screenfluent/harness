@@ -38,7 +38,7 @@ hs help
 
 ## How it works
 
-The core is a pure state machine (~670 lines). It does three things:
+The core is a pure state machine (~500 lines). It does three things:
 
 1. **Discovers plugins** by walking from CWD up to `$HOME`, collecting `.harness/` directories and bundled plugin packs. Provider plugins are scoped — only the active provider's plugin participates. Discovery reruns every loop iteration, so plugins can be added/removed at runtime.
 
@@ -49,6 +49,17 @@ The core is a pure state machine (~670 lines). It does three things:
 The loop has zero provider-specific knowledge. Message formats, API calls, response parsing — all of it lives in provider-specific hooks (`plugins/anthropic/`, `plugins/openai/`, `plugins/zai/`). Provider-agnostic behavior (tool execution, prompt loading, tool discovery) lives in `plugins/core/`. Additional bundled plugins provide subagent spawning (`plugins/subagents/`) and skill discovery (`plugins/skills/`).
 
 ## Plugin types
+
+### Commands
+
+Executables in `commands/` directories. CLI subcommands are discovered via the same source walk as other plugin types. Each supports one flag:
+
+```bash
+my-command --describe  # one-line human description
+my-command [args...]   # execute the command
+```
+
+Built-in commands: `run`, `chat`, `session`, `tools`, `hooks`, `help`, `version`. Override any built-in by placing a same-named executable in a higher-priority `commands/` directory.
 
 ### Tools
 
@@ -111,6 +122,7 @@ See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plug
   prompts/                   # additional prompt files (sorted, all loaded)
     00-persona.md
     10-coding-style.md
+  commands/                  # global custom commands
   tools/                     # global custom tools
   hooks.d/                   # global hooks
   providers/                 # global providers
@@ -118,8 +130,10 @@ See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plug
 
 ~/project/AGENTS.md          # project-specific instructions (agents.md standard)
 ~/project/.harness/          # project-local (loaded when CWD is under ~/project)
+  commands/
+    deploy                   # project-specific deploy command
   tools/
-    deploy                   # project-specific deploy tool
+    lint-check               # project-specific tool
   hooks.d/
     tool_exec/
       05-approve             # require approval for this project

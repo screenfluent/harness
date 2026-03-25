@@ -1,6 +1,33 @@
 # Plugin Protocols
 
-Harness has three plugin types that follow executable protocols: tools, providers, and hooks. Each is a standalone executable (any language) discovered from `.harness/` directories and `plugins/*/`.
+Harness has four plugin types that follow executable protocols: commands, tools, providers, and hooks. Each is a standalone executable (any language) discovered from `.harness/` directories and `plugins/*/`.
+
+## Commands
+
+Commands are executables in `commands/` directories. They implement CLI subcommands for `harness`.
+
+| Flag | Output | Purpose |
+|------|--------|---------|
+| `--describe` | one line on stdout | Short description for `hs help` |
+| *(none)* | varies | Execute the command with remaining args |
+
+When invoked, commands receive remaining CLI arguments. The following `HARNESS_*` env vars are exported before dispatch: `HARNESS_ROOT`, `HARNESS_HOME`, `HARNESS_SESSIONS`, `HARNESS_PROVIDER`, `HARNESS_MODEL`, `HARNESS_MAX_TURNS`, `HARNESS_LOG`, `HARNESS_VERSION`.
+
+Commands that need access to harness internals (session management, agent loop, discovery functions) source `bin/harness`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  --describe) echo "short description"; exit 0 ;;
+esac
+source "${HARNESS_ROOT}/bin/harness"
+# ... use harness functions ...
+```
+
+The `BASH_SOURCE` guard at the end of `bin/harness` prevents `main()` from running when sourced.
+
+Discovery follows the same source walk and override rules as other plugin types — local overrides global by basename.
 
 ## Tools
 
@@ -327,6 +354,6 @@ Plugin sources are searched lowest to highest priority:
    - Plugin packs within that dir (`plugins/*/`, sorted) — **provider plugins filtered**
    - The dir itself
 
-Within each type (tools, providers, hooks), later entries override earlier ones sharing the same basename. This means a local plugin always overrides a bundled one with the same name.
+Within each type (commands, tools, providers, hooks), later entries override earlier ones sharing the same basename. This means a local plugin always overrides a bundled one with the same name.
 
-Discovery is fully dynamic — the agent loop rediscovers all plugins on every iteration, so tools, hooks, and prompts can be added or removed at runtime.
+Discovery is fully dynamic — the agent loop rediscovers tools, hooks, and prompts on every iteration, so they can be added or removed at runtime. Commands are discovered once at CLI dispatch time.
