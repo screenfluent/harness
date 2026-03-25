@@ -3,19 +3,16 @@
 #
 # Iterates HARNESS_SOURCES (global first = lowest priority first in the list),
 # collecting AGENTS.md files and prompts/*.md from each source.
-# The baked-in HARNESS_SYSTEM from env is always the very first block.
 #
 # AGENTS.md follows the agents.md standard (https://agents.md): the file lives
 # at the project root (the parent of each .harness/ source directory), not
 # inside .harness/ itself.  Additional prompt fragments in prompts/*.md remain
-# a harness-specific composability feature.
+# a harness-specific composability feature (including the core system prompt
+# at plugins/core/prompts/001-system.md).
 set -euo pipefail
 
 payload="$(cat)"
 system_parts=()
-
-# Start with the baked-in system prompt
-system_parts+=("${HARNESS_SYSTEM}")
 
 # Iterate HARNESS_SOURCES (global first = lowest priority first)
 IFS=':' read -ra sources <<< "${HARNESS_SOURCES}"

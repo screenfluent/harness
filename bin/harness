@@ -25,10 +25,6 @@ HARNESS_PROVIDER="${HARNESS_PROVIDER:-}"
 HARNESS_MAX_TURNS="${HARNESS_MAX_TURNS:-100}"
 HARNESS_LOG="${HARNESS_LOG:-/dev/stderr}"
 
-# Baked-in system prompt. Keep this under 50 words.
-# Everything else comes from plugins (see 30-prompts hook).
-HARNESS_SYSTEM="You are an autonomous agent running in a terminal. Use your tools to complete the task. Be direct. When done, say DONE."
-
 # State machine default transitions
 declare -A DEFAULT_NEXT=(
   [start]=assemble
@@ -144,7 +140,7 @@ run_hooks() {
   [[ ! -t 0 ]] && current="$(cat)"
 
   export HARNESS_SESSION="${SESSION_DIR:-}" HARNESS_STAGE="${stage}"
-  export HARNESS_MODEL HARNESS_PROVIDER HARNESS_SYSTEM HARNESS_ROOT
+  export HARNESS_MODEL HARNESS_PROVIDER HARNESS_ROOT
   export HARNESS_LOG HARNESS_SOURCES
 
   for hook in "${hooks[@]:-}"; do

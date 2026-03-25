@@ -195,7 +195,6 @@ Every hook receives:
 | `HARNESS_STAGE` | current hook stage name |
 | `HARNESS_MODEL` | selected model |
 | `HARNESS_PROVIDER` | selected provider name |
-| `HARNESS_SYSTEM` | base system prompt |
 | `HARNESS_ROOT` | harness installation directory |
 | `HARNESS_SOURCES` | colon-separated list of active plugin source directories |
 | `HARNESS_LOG` | log file path |
