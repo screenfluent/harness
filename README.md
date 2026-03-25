@@ -46,7 +46,7 @@ The core is a pure state machine (~670 lines). It does three things:
 
 3. **Transitions**: `start → assemble → send → receive → (tool_exec → tool_done → assemble) → done`.
 
-The loop has zero provider-specific knowledge. Message formats, API calls, response parsing — all of it lives in provider-specific hooks (`plugins/anthropic/`, `plugins/openai/`, `plugins/zai/`). Provider-agnostic behavior (tool execution, prompt loading, tool discovery) lives in `plugins/core/`.
+The loop has zero provider-specific knowledge. Message formats, API calls, response parsing — all of it lives in provider-specific hooks (`plugins/anthropic/`, `plugins/openai/`, `plugins/zai/`). Provider-agnostic behavior (tool execution, prompt loading, tool discovery) lives in `plugins/core/`. Additional bundled plugins provide subagent spawning (`plugins/subagents/`) and skill discovery (`plugins/skills/`).
 
 ## Plugin types
 
@@ -62,7 +62,7 @@ my-tool --exec      # execute: read JSON input from stdin, write result to stdou
 
 Write tools in any language. See `examples/tools/web_fetch` for a Python example.
 
-Built-in tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`.
+Built-in tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`, `agent`, `skill`.
 
 ### Hooks
 
@@ -123,9 +123,14 @@ See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plug
   hooks.d/
     tool_exec/
       05-approve             # require approval for this project
+  skills/
+    my-skill/
+      SKILL.md               # frontmatter (name, description) + instructions
 ```
 
 System prompts follow the [agents.md](https://agents.md) standard: place an `AGENTS.md` file at the root of any directory with a `.harness/` config. For composable prompt fragments, use `prompts/*.md` inside `.harness/`.
+
+Skills are directories containing a `SKILL.md` with YAML frontmatter (`name`, `description`). Place them in `.harness/skills/` or `.agents/skills/` at any level. The `25-skills` assemble hook discovers them and injects a catalog into the system prompt; the `skill` tool loads full instructions on demand.
 
 When multiple `.harness/` directories exist in the path from CWD to `$HOME`, they all contribute. For hooks and tools with the same basename, the most-local one wins. For prompt content, everything is concatenated (global first, local last, so local instructions can refine global ones).
 

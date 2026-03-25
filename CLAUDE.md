@@ -52,7 +52,7 @@ Harness walks from CWD upward to `/`, collecting `.harness/` directories. Local 
 
 ### Four Plugin Types
 
-**Tools** (`tools/`): Executables responding to `--schema`, `--describe`, `--exec`. Input is JSON on stdin via `--exec`, output on stdout. Language-agnostic. Core tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`.
+**Tools** (`tools/`): Executables responding to `--schema`, `--describe`, `--exec`. Input is JSON on stdin via `--exec`, output on stdout. Language-agnostic. Core tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`. Additional bundled tools: `agent` (spawn subagent sessions), `skill` (load skill instructions).
 
 **Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `start`, `assemble`, `send`, `receive`, `tool_exec`, `tool_done`, `error`, `done`.
 
@@ -78,6 +78,8 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 - `plugins/openai/providers/openai` — OpenAI-compatible API call (works with ollama, llama.cpp, vLLM)
 - `plugins/zai/` — z.ai provider (Anthropic-compatible, hooks symlinked to anthropic)
 - `plugins/core/tools/` — five built-in tools
+- `plugins/subagents/` — `agent` tool + prompt fragment for spawning child sessions
+- `plugins/skills/` — `skill` tool + `25-skills` assemble hook for skill discovery
 
 ## Conventions
 
