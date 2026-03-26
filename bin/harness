@@ -29,63 +29,48 @@ HARNESS_LOG="${HARNESS_LOG:-/dev/stderr}"
 # --------------------------------------------------------------------------- #
 #  Source discovery                                                            #
 # --------------------------------------------------------------------------- #
-# Fully dynamic — called every loop iteration. Walks CWD upward collecting
-# .harness/ dirs and bundled plugins. Provider plugins (dirs containing a
-# providers/ subdir) are skipped if their basename != HARNESS_PROVIDER.
+
+# Emit .harness/ dirs, global-first. Used by _discover_sources and commands.
+_harness_dirs() {
+  local cur="${PWD}" seen_home=0
+  { while true; do
+      if [[ -d "${cur}/.harness" ]]; then
+        echo "${cur}/.harness"
+        [[ "${cur}/.harness" == "${HARNESS_HOME}" ]] && seen_home=1
+      fi
+      [[ "${cur}" == "/" ]] && break
+      cur="$(dirname "${cur}")"
+    done
+    (( seen_home )) || echo "${HARNESS_HOME}"
+  } | tac
+}
 
 _HARNESS_SOURCES=()
 
+# Fully dynamic — called every loop iteration. Collects bundled plugins and
+# .harness/ dirs. Provider plugins are scoped to HARNESS_PROVIDER.
 _discover_sources() {
   _HARNESS_SOURCES=()
 
-  # Bundled plugins (lowest priority)
+  # Bundled plugins (lowest priority), provider-scoped
   local d
   for d in "${HARNESS_ROOT}/plugins"/*/; do
-    [[ -d "${d}" ]] || continue
-    d="${d%/}"
-    if [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]]; then
-      continue
-    fi
+    [[ -d "${d}" ]] || continue; d="${d%/}"
+    [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]] && continue
     _HARNESS_SOURCES+=("${d}")
   done
 
-  # Collect .harness/ dirs: CWD upward (most-local first)
-  local harness_dirs=()
-  local cur="${PWD}"
-  while true; do
-    [[ -d "${cur}/.harness" ]] && harness_dirs+=("${cur}/.harness")
-    [[ "${cur}" == "/" ]] && break
-    cur="$(dirname "${cur}")"
-  done
-  # Ensure ~/.harness always present
-  local found=0
-  for d in "${harness_dirs[@]:-}"; do
-    [[ "${d}" == "${HARNESS_HOME}" ]] && found=1
-  done
-  (( found )) || harness_dirs+=("${HARNESS_HOME}")
-
-  # Process global-first (reverse of harness_dirs)
-  local i
-  for (( i=${#harness_dirs[@]}-1; i>=0; i-- )); do
-    local hd="${harness_dirs[i]}"
+  # User dirs + their plugin packs
+  while IFS= read -r hd; do
     for d in "${hd}/plugins"/*/; do
-      [[ -d "${d}" ]] || continue
-      d="${d%/}"
-      if [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]]; then
-        continue
-      fi
+      [[ -d "${d}" ]] || continue; d="${d%/}"
+      [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]] && continue
       _HARNESS_SOURCES+=("${d}")
     done
     _HARNESS_SOURCES+=("${hd}")
-  done
+  done < <(_harness_dirs)
 
-  # Export colon-separated list for hooks
-  local joined=""
-  for d in "${_HARNESS_SOURCES[@]}"; do
-    [[ -n "${joined}" ]] && joined+=":"
-    joined+="${d}"
-  done
-  export HARNESS_SOURCES="${joined}"
+  local IFS=':'; export HARNESS_SOURCES="${_HARNESS_SOURCES[*]}"
 }
 
 # --------------------------------------------------------------------------- #
@@ -98,71 +83,38 @@ _discover_sources() {
 
 run_hooks() {
   local stage="$1"; shift
-  local extra_args=("$@")
 
-  # Collect hooks from all sources (lowest to highest priority).
-  # Later entries override earlier ones sharing the same basename.
-  declare -A hook_map
-  local order=()
-
+  # Collect hooks: last source wins per basename (local overrides global)
+  declare -A hook_map=()
   local src
   for src in "${_HARNESS_SOURCES[@]}"; do
-    _collect_hooks_from "${src}/hooks.d/${stage}" hook_map order
+    local dir="${src}/hooks.d/${stage}"
+    [[ -d "${dir}" ]] || continue
+    local f
+    for f in "${dir}"/*; do
+      [[ -x "${f}" ]] || continue
+      hook_map["$(basename "${f}")"]="${f}"
+    done
   done
 
-  # Sort by basename (numeric prefix gives order)
-  mapfile -t sorted < <(printf '%s\n' "${order[@]}" | sort -t/ -k1,1)
-
-  # Resolve back to full paths, deduplicated
-  local hooks=()
-  local seen=()
-  for base in "${sorted[@]:-}"; do
-    [[ -z "${base}" ]] && continue
-    local dup=0
-    for s in "${seen[@]:-}"; do [[ "$s" == "$base" ]] && dup=1; done
-    (( dup )) && continue
-    seen+=("$base")
-    hooks+=("${hook_map[$base]}")
-  done
-
-  # Run the pipeline
   local current=""
   [[ ! -t 0 ]] && current="$(cat)"
+  (( ${#hook_map[@]} )) || { printf '%s' "${current}"; return 0; }
 
   export HARNESS_SESSION="${SESSION_DIR:-}" HARNESS_STAGE="${stage}"
-  export HARNESS_MODEL HARNESS_PROVIDER HARNESS_ROOT
-  export HARNESS_LOG HARNESS_SOURCES
+  export HARNESS_MODEL HARNESS_PROVIDER HARNESS_ROOT HARNESS_LOG HARNESS_SOURCES
 
-  for hook in "${hooks[@]:-}"; do
-    [[ -z "${hook}" ]] && continue
-    current="$(
-      echo "${current}" | "${hook}" "${extra_args[@]}" 2>>"${HARNESS_LOG}"
-    )"
-    local rc=$?
-    if (( rc != 0 )); then
-      _log "hook ${hook} exited ${rc} during ${stage}"
-      printf '%s' "${current}"
-      return ${rc}
-    fi
-  done
+  # Sort by basename (numeric prefix gives order), execute as pipeline
+  local base
+  while IFS= read -r base; do
+    current="$(echo "${current}" | "${hook_map[$base]}" "$@" 2>>"${HARNESS_LOG}")" || {
+      local rc=$?
+      _log "hook ${hook_map[$base]} exited ${rc} during ${stage}"
+      printf '%s' "${current}"; return ${rc}
+    }
+  done < <(printf '%s\n' "${!hook_map[@]}" | sort)
 
   printf '%s' "${current}"
-}
-
-_collect_hooks_from() {
-  local dir="$1"
-  local -n map_ref="$2"
-  local -n order_ref="$3"
-  [[ -d "${dir}" ]] || return 0
-  local f
-  for f in "${dir}"/*; do
-    [[ -x "${f}" ]] || continue
-    local base="$(basename "${f}")"
-    map_ref["${base}"]="${f}"
-    local found=0
-    for o in "${order_ref[@]:-}"; do [[ "$o" == "$base" ]] && found=1; done
-    (( found )) || order_ref+=("${base}")
-  done
 }
 
 # --------------------------------------------------------------------------- #

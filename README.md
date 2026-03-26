@@ -38,7 +38,7 @@ hs help
 
 ## How it works
 
-The core is a state follower (~270 lines). It does three things:
+The core is a state follower (~220 lines). It does three things:
 
 1. **Discovers plugins** by walking from CWD up to `$HOME`, collecting `.harness/` directories and bundled plugin packs. Provider plugins are scoped — only the active provider's plugin participates. Discovery reruns every loop iteration, so plugins can be added/removed at runtime.
 

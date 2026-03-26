@@ -20,50 +20,17 @@ _collect_tools_from() {
 }
 
 _discover_providers() {
-  # Walk bundled plugins + .harness/ dirs WITHOUT provider scoping
-  local all_sources=()
-
-  local d
-  for d in "${HARNESS_ROOT}/plugins"/*/; do
-    [[ -d "${d}" ]] && all_sources+=("${d%/}")
-  done
-
-  local harness_dirs=()
-  local cur="${PWD}"
-  while true; do
-    [[ -d "${cur}/.harness" ]] && harness_dirs+=("${cur}/.harness")
-    [[ "${cur}" == "/" ]] && break
-    cur="$(dirname "${cur}")"
-  done
-  local found=0
-  for d in "${harness_dirs[@]:-}"; do
-    [[ "${d}" == "${HARNESS_HOME}" ]] && found=1
-  done
-  (( found )) || harness_dirs+=("${HARNESS_HOME}")
-
-  local i
-  for (( i=${#harness_dirs[@]}-1; i>=0; i-- )); do
-    local hd="${harness_dirs[i]}"
-    for d in "${hd}/plugins"/*/; do
-      [[ -d "${d}" ]] && all_sources+=("${d%/}")
-    done
-    all_sources+=("${hd}")
-  done
-
   declare -A prov_map
-  local src
-  for src in "${all_sources[@]}"; do
-    local dir="${src}/providers"
-    [[ -d "${dir}" ]] || continue
-    local f
-    for f in "${dir}"/*; do
-      [[ -x "${f}" ]] || continue
-      prov_map["$(basename "${f}")"]="${f}"
+  local f
+  for f in "${HARNESS_ROOT}/plugins"/*/providers/*; do
+    [[ -x "$f" ]] && prov_map["$(basename "$f")"]="$f"
+  done
+  while IFS= read -r hd; do
+    for f in "${hd}/providers"/* "${hd}/plugins"/*/providers/*; do
+      [[ -x "$f" ]] && prov_map["$(basename "$f")"]="$f"
     done
-  done
-  for name in "${!prov_map[@]}"; do
-    echo "${name} ${prov_map[$name]}"
-  done
+  done < <(_harness_dirs)
+  for name in "${!prov_map[@]}"; do echo "${name} ${prov_map[$name]}"; done
 }
 
 cat <<'EOF'

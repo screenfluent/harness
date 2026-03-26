@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Harness is a minimal agent loop in bash. The core script (~270 lines) is a plugin discovery walker, hook pipeline runner, state follower, and CLI dispatch. Everything else — session management, provider discovery, tool discovery, message assembly, API calls, response parsing, tool execution, prompt loading, cost tracking, approval gates, CLI commands — lives in hooks and plugins that can be written in any language.
+Harness is a minimal agent loop in bash. The core script (~220 lines) is a plugin discovery walker, hook pipeline runner, state follower, and CLI dispatch. Everything else — session management, provider discovery, tool discovery, message assembly, API calls, response parsing, tool execution, prompt loading, cost tracking, approval gates, CLI commands — lives in hooks and plugins that can be written in any language.
 
 Dependencies: bash 4+, jq, curl. No package manager, no language runtime.
 
@@ -75,7 +75,7 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 
 ### Key Files
 
-- `bin/harness` — core: source discovery, hook pipeline runner, state follower, CLI dispatch (~270 lines)
+- `bin/harness` — core: source discovery, hook pipeline runner, state follower, CLI dispatch (~220 lines)
 - `plugins/core/commands/` — built-in CLI commands (agent, session, tools, hooks, help, version)
 - `plugins/core/hooks.d/` — provider-agnostic hooks (send, tool_exec, tool_done, assemble/tools, assemble/prompts)
 - `plugins/anthropic/hooks.d/` — Anthropic-specific hooks (assemble/messages, receive/save)
