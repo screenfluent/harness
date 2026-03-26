@@ -6,52 +6,35 @@ case "${1:-}" in --describe) echo "run the agent (interactive or one-shot)"; exi
 
 source "${HARNESS_ROOT}/bin/harness"
 
-# --- Provider resolution (inlined, private) ---
+# --- Provider resolution ---
 
-# Unscoped: find all provider executables across bundled + user dirs.
-_discover_providers() {
-  declare -A prov_map
-  local f
-  for f in "${HARNESS_ROOT}/plugins"/*/providers/*; do
-    [[ -x "$f" ]] && prov_map["$(basename "$f")"]="$f"
-  done
-  while IFS= read -r hd; do
-    for f in "${hd}/providers"/* "${hd}/plugins"/*/providers/*; do
-      [[ -x "$f" ]] && prov_map["$(basename "$f")"]="$f"
-    done
-  done < <(_harness_dirs)
-  for name in "${!prov_map[@]}"; do echo "${name} ${prov_map[$name]}"; done
-}
-
-# Find provider binary by name using scoped sources
-_find_provider() {
-  local name="$1"
-  _discover_sources
-  local i
-  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
-    [[ -x "${_HARNESS_SOURCES[i]}/providers/${name}" ]] && {
-      echo "${_HARNESS_SOURCES[i]}/providers/${name}"
-      return 0
-    }
-  done
-  return 1
-}
-
-# Auto-detect provider if unset, then load its defaults
 _resolve_provider() {
+  # With HARNESS_PROVIDER empty, sources hooks include all provider plugins
+  _refresh_sources
   if [[ -z "${HARNESS_PROVIDER}" ]]; then
-    local name path
-    while read -r name path; do
-      [[ -z "${name}" ]] && continue
-      if "${path}" --ready 2>/dev/null; then
-        HARNESS_PROVIDER="${name}"
-        break
-      fi
-    done < <(_discover_providers | sort)
+    local src f name
+    for src in "${_HARNESS_SOURCES[@]}"; do
+      [[ -d "${src}/providers" ]] || continue
+      for f in "${src}/providers"/*; do
+        [[ -x "$f" ]] || continue
+        name="$(basename "$f")"
+        if "$f" --ready 2>/dev/null; then
+          HARNESS_PROVIDER="${name}"
+          break 2
+        fi
+      done
+    done
   fi
   [[ -z "${HARNESS_PROVIDER}" ]] && return 0
-  local provider_path
-  provider_path="$(_find_provider "${HARNESS_PROVIDER}")" || return 0
+  # Get defaults from provider binary
+  local provider_path="" i
+  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
+    [[ -x "${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}" ]] && {
+      provider_path="${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}"
+      break
+    }
+  done
+  [[ -z "${provider_path}" ]] && return 0
   local key val
   while IFS='=' read -r key val; do
     [[ -z "${key}" ]] && continue
@@ -59,7 +42,6 @@ _resolve_provider() {
       model) [[ -z "${HARNESS_MODEL}" ]] && HARNESS_MODEL="${val}" ;;
     esac
   done < <("${provider_path}" --defaults 2>/dev/null || true)
-  return 0
 }
 
 # --- Session helpers (inlined, private) ---

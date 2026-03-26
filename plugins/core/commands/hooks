@@ -9,7 +9,7 @@ esac
 source "${HARNESS_ROOT}/bin/harness"
 
 stage="${1:-}"
-_discover_sources
+_refresh_sources
 search_dirs=()
 for src in "${_HARNESS_SOURCES[@]}"; do
   search_dirs+=("${src}/hooks.d")

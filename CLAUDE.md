@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Harness is a minimal agent loop in bash. The core script (~220 lines) is a plugin discovery walker, hook pipeline runner, state follower, and CLI dispatch. Everything else — session management, provider discovery, tool discovery, message assembly, API calls, response parsing, tool execution, prompt loading, cost tracking, approval gates, CLI commands — lives in hooks and plugins that can be written in any language.
+Harness is a minimal agent loop in bash. The core script (~100 SLOC) is a bootstrap, hook pipeline runner (`call`), state follower, and CLI dispatch. Even source discovery is hookable — the `sources` stage lets plugins control which directories participate. Everything else — session management, provider discovery, tool discovery, message assembly, API calls, response parsing, tool execution, prompt loading — lives in hooks and plugins that can be written in any language.
 
 Dependencies: bash 4+, jq, curl. No package manager, no language runtime.
 
@@ -45,13 +45,16 @@ start → assemble → send → receive → done
 
 This diagram is emergent from hooks, not hardcoded. Hooks drive iteration: `tool_exec` pops one call, `tool_done` routes back to `tool_exec` or `assemble`.
 
-Discovery is fully dynamic — plugins are rediscovered every loop iteration, so tools and hooks can be added/removed at runtime.
+Discovery is fully dynamic and hookable — `_refresh_sources` runs every loop iteration, calling the `sources` stage hooks to rebuild the source list. Plugins can be added/removed at runtime.
 
 ### Plugin Discovery & Provider Scoping
 
-Harness walks from CWD upward to `/`, collecting `.harness/` directories. Local overrides global by basename. Bundled plugins in `plugins/*/` are loaded at lowest priority.
+Source discovery is a hookable `sources` stage. The core bootstraps with bundled plugins + `~/.harness`, then runs `call sources` — a pipeline of hooks that build the full source list. The default hooks:
 
-**Provider plugins** — any plugin directory containing a `providers/` subdirectory — are scoped: only the active provider's plugin is loaded. This means `plugins/anthropic/` hooks only participate when `HARNESS_PROVIDER=anthropic`. Non-provider plugins (like `plugins/core/`) always participate.
+- `30-walk-dirs` — walks from CWD upward to `/`, collecting `.harness/` directories and plugin packs. Local overrides global by basename.
+- `40-scope-providers` — filters provider plugins by `HARNESS_PROVIDER`. When `HARNESS_PROVIDER` is empty, all providers pass through (needed for auto-detection).
+
+Override either by placing a same-named hook in a higher-priority source dir.
 
 ### Five Plugin Types
 
@@ -75,7 +78,7 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 
 ### Key Files
 
-- `bin/harness` — core: source discovery, hook pipeline runner, state follower, CLI dispatch (~220 lines)
+- `bin/harness` — core: bootstrap, `call` (hook pipeline runner), state follower, CLI dispatch (~100 SLOC)
 - `plugins/core/commands/` — built-in CLI commands (agent, session, tools, hooks, help, version)
 - `plugins/core/hooks.d/` — provider-agnostic hooks (send, tool_exec, tool_done, assemble/tools, assemble/prompts)
 - `plugins/anthropic/hooks.d/` — Anthropic-specific hooks (assemble/messages, receive/save)

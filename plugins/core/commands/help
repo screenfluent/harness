@@ -20,16 +20,18 @@ _collect_tools_from() {
 }
 
 _discover_providers() {
-  declare -A prov_map
-  local f
-  for f in "${HARNESS_ROOT}/plugins"/*/providers/*; do
-    [[ -x "$f" ]] && prov_map["$(basename "$f")"]="$f"
-  done
-  while IFS= read -r hd; do
-    for f in "${hd}/providers"/* "${hd}/plugins"/*/providers/*; do
+  # Temporarily unscope to see all provider plugins
+  local saved="${HARNESS_PROVIDER}"
+  HARNESS_PROVIDER="" _refresh_sources
+  HARNESS_PROVIDER="${saved}"
+  declare -A prov_map=()
+  local src f
+  for src in "${_HARNESS_SOURCES[@]}"; do
+    [[ -d "${src}/providers" ]] || continue
+    for f in "${src}/providers"/*; do
       [[ -x "$f" ]] && prov_map["$(basename "$f")"]="$f"
     done
-  done < <(_harness_dirs)
+  done
   for name in "${!prov_map[@]}"; do echo "${name} ${prov_map[$name]}"; done
 }
 
@@ -49,7 +51,7 @@ usage:
 EOF
 
 # Discover plugin-added commands beyond the built-ins
-_discover_sources
+_refresh_sources
 declare -A cmd_map
 local_cmds=()
 for src in "${_HARNESS_SOURCES[@]}"; do

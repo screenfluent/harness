@@ -38,11 +38,11 @@ hs help
 
 ## How it works
 
-The core is a state follower (~220 lines). It does three things:
+The core is a state follower (~100 SLOC). It does three things:
 
-1. **Discovers plugins** by walking from CWD up to `$HOME`, collecting `.harness/` directories and bundled plugin packs. Provider plugins are scoped — only the active provider's plugin participates. Discovery reruns every loop iteration, so plugins can be added/removed at runtime.
+1. **Bootstraps** with bundled plugins + `~/.harness`, then runs `call sources` — a hookable pipeline that discovers all source directories. The default `30-walk-dirs` hook walks CWD upward collecting `.harness/` directories; `40-scope-providers` filters by active provider. Discovery reruns every loop iteration, so plugins can be added/removed at runtime.
 
-2. **Dispatches hooks** at each state. Hooks are executables sorted by numeric prefix, chained as a pipeline. Hook output is JSON; the `next_state` field drives state transitions.
+2. **Dispatches hooks** via `call <name>`. Hooks are executables sorted by numeric prefix, chained as a pipeline. Hook output is JSON; the `next_state` field drives state transitions.
 
 3. **Follows states** until `next_state` is empty. The core has no built-in transitions — the topology `start → assemble → send → receive → (tool_exec → tool_done → assemble) → done` is emergent from which hooks exist and what `next_state` they emit.
 
@@ -81,6 +81,7 @@ Executables in `hooks.d/<stage>/` directories. Stages:
 
 | Stage | stdin | Emits next_state | Purpose |
 |---|---|---|---|
+| `sources` | `{}` | _(n/a — called by core)_ | Discover source directories |
 | `start` | `{}` | `assemble` | Session initialization |
 | `assemble` | `{}` | `send` | Build the API request payload |
 | `send` | payload JSON | `receive` | Call the provider |

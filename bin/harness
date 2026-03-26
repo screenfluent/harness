@@ -3,73 +3,43 @@
 set -euo pipefail
 
 HARNESS_VERSION="0.1.0"
-HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
-readonly HARNESS_ROOT
+readonly HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
 # Overridable
 HARNESS_HOME="${HARNESS_HOME:-${HOME}/.harness}"
-# Session store: walk up from CWD to find nearest .harness/sessions/, else ~/.harness/sessions
+# Session store: nearest .harness/sessions/ walking up from CWD
 if [[ -z "${HARNESS_SESSIONS:-}" ]]; then
+  HARNESS_SESSIONS="${HARNESS_HOME}/sessions"
   _cur="${PWD}"
-  while true; do
-    if [[ -d "${_cur}/.harness/sessions" ]]; then
-      HARNESS_SESSIONS="${_cur}/.harness/sessions"
-      break
-    fi
-    [[ "${_cur}" == "/" ]] && break
+  while [[ "${_cur}" != "/" ]]; do
+    [[ -d "${_cur}/.harness/sessions" ]] && { HARNESS_SESSIONS="${_cur}/.harness/sessions"; break; }
     _cur="$(dirname "${_cur}")"
-  done
-  HARNESS_SESSIONS="${HARNESS_SESSIONS:-${HARNESS_HOME}/sessions}"
-  unset _cur
+  done; unset _cur
 fi
 HARNESS_MODEL="${HARNESS_MODEL:-}"
 HARNESS_PROVIDER="${HARNESS_PROVIDER:-}"
 HARNESS_MAX_TURNS="${HARNESS_MAX_TURNS:-100}"
 HARNESS_LOG="${HARNESS_LOG:-/dev/stderr}"
 
+# Export early — hooks run as subprocesses and need these
+export HARNESS_VERSION HARNESS_ROOT HARNESS_HOME HARNESS_SESSIONS HARNESS_MODEL HARNESS_PROVIDER HARNESS_MAX_TURNS HARNESS_LOG
+
 # --------------------------------------------------------------------------- #
 #  Source discovery                                                            #
 # --------------------------------------------------------------------------- #
 
-# Emit .harness/ dirs, global-first. Used by _discover_sources and commands.
-_harness_dirs() {
-  local cur="${PWD}" seen_home=0
-  { while true; do
-      if [[ -d "${cur}/.harness" ]]; then
-        echo "${cur}/.harness"
-        [[ "${cur}/.harness" == "${HARNESS_HOME}" ]] && seen_home=1
-      fi
-      [[ "${cur}" == "/" ]] && break
-      cur="$(dirname "${cur}")"
-    done
-    (( seen_home )) || echo "${HARNESS_HOME}"
-  } | tac
-}
-
 _HARNESS_SOURCES=()
 
-# Fully dynamic — called every loop iteration. Collects bundled plugins and
-# .harness/ dirs. Provider plugins are scoped to HARNESS_PROVIDER.
-_discover_sources() {
+# Bootstrap with bundled plugins + HARNESS_HOME, then run hookable sources stage.
+_refresh_sources() {
   _HARNESS_SOURCES=()
-
-  # Bundled plugins (lowest priority), provider-scoped
   local d
   for d in "${HARNESS_ROOT}/plugins"/*/; do
-    [[ -d "${d}" ]] || continue; d="${d%/}"
-    [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]] && continue
-    _HARNESS_SOURCES+=("${d}")
+    [[ -d "${d}" ]] && _HARNESS_SOURCES+=("${d%/}")
   done
-
-  # User dirs + their plugin packs
-  while IFS= read -r hd; do
-    for d in "${hd}/plugins"/*/; do
-      [[ -d "${d}" ]] || continue; d="${d%/}"
-      [[ -d "${d}/providers" && "$(basename "${d}")" != "${HARNESS_PROVIDER}" ]] && continue
-      _HARNESS_SOURCES+=("${d}")
-    done
-    _HARNESS_SOURCES+=("${hd}")
-  done < <(_harness_dirs)
-
+  [[ -d "${HARNESS_HOME}" ]] && _HARNESS_SOURCES+=("${HARNESS_HOME}")
+  local result
+  result="$(echo '{}' | call sources)" || return
+  mapfile -t _HARNESS_SOURCES < <(echo "${result}" | jq -r '.sources[]')
   local IFS=':'; export HARNESS_SOURCES="${_HARNESS_SOURCES[*]}"
 }
 
@@ -81,28 +51,23 @@ _discover_sources() {
 # prefix, and run as a pipeline: each hook's stdout feeds the next hook's
 # stdin. Non-zero exit aborts the chain.
 
-run_hooks() {
+call() {
   local stage="$1"; shift
 
   # Collect hooks: last source wins per basename (local overrides global)
   declare -A hook_map=()
-  local src
+  local src f
   for src in "${_HARNESS_SOURCES[@]}"; do
-    local dir="${src}/hooks.d/${stage}"
-    [[ -d "${dir}" ]] || continue
-    local f
-    for f in "${dir}"/*; do
-      [[ -x "${f}" ]] || continue
-      hook_map["$(basename "${f}")"]="${f}"
+    [[ -d "${src}/hooks.d/${stage}" ]] || continue
+    for f in "${src}/hooks.d/${stage}"/*; do
+      [[ -x "${f}" ]] && hook_map["$(basename "${f}")"]="${f}"
     done
   done
 
-  local current=""
-  [[ ! -t 0 ]] && current="$(cat)"
+  local current=""; [[ ! -t 0 ]] && current="$(cat)"
   (( ${#hook_map[@]} )) || { printf '%s' "${current}"; return 0; }
 
   export HARNESS_SESSION="${SESSION_DIR:-}" HARNESS_STAGE="${stage}"
-  export HARNESS_MODEL HARNESS_PROVIDER HARNESS_ROOT HARNESS_LOG HARNESS_SOURCES
 
   # Sort by basename (numeric prefix gives order), execute as pipeline
   local base
@@ -126,9 +91,8 @@ agent_loop() {
   local state="start" context='{}' result="" rc=0 iterations=0
 
   while [[ -n "${state}" ]]; do
-    _discover_sources
-    result="" rc=0
-    result="$(echo "${context}" | run_hooks "${state}")" && rc=0 || rc=$?
+    _refresh_sources
+    result="$(echo "${context}" | call "${state}")" && rc=0 || rc=$?
 
     if (( rc != 0 )); then
       [[ "${state}" == "error" ]] && break
@@ -137,36 +101,19 @@ agent_loop() {
 
     state="$(echo "${result}" | jq -r '.next_state // empty' 2>/dev/null)" || true
     context="$(echo "${result}" | jq -c 'del(.next_state)' 2>/dev/null)" || context='{}'
-    [[ -z "${context}" || "${context}" == "null" ]] && context='{}'
 
-    # Safety valve
-    iterations=$((iterations + 1))
-    if (( iterations > HARNESS_MAX_TURNS * 3 )); then
-      _log "safety: exceeded max iterations"; break
-    fi
+    (( ++iterations > HARNESS_MAX_TURNS * 3 )) && { _log "safety: exceeded max iterations"; break; }
   done
 
-  # Print output from terminal state
-  local output
-  output="$(echo "${result:-}" | jq -r '.output // empty' 2>/dev/null)" || true
+  local output; output="$(echo "${result:-}" | jq -r '.output // empty' 2>/dev/null)" || true
   [[ -n "${output}" ]] && printf '%s\n' "${output}"
 }
 
 # --------------------------------------------------------------------------- #
 #  Utilities                                                                   #
 # --------------------------------------------------------------------------- #
-_log() {
-  echo "[harness] $*" >> "${HARNESS_LOG}"
-}
-
-_die() {
-  echo "harness: $*" >&2
-  exit 1
-}
-
-_require() {
-  command -v "$1" &>/dev/null || _die "required command '$1' not found"
-}
+_log() { echo "[harness] $*" >> "${HARNESS_LOG}"; }
+_die() { echo "harness: $*" >&2; exit 1; }
 
 # --------------------------------------------------------------------------- #
 #  Command discovery                                                           #
@@ -176,12 +123,9 @@ _require() {
 # Discovery follows the same source walk as tools/hooks: local overrides global.
 
 _find_command() {
-  local target="$1"
-  local result=""
-  local src
+  local target="$1" result="" src
   for src in "${_HARNESS_SOURCES[@]}"; do
-    local f="${src}/commands/${target}"
-    [[ -x "$f" && -f "$f" ]] && result="$f"
+    [[ -x "${src}/commands/${target}" ]] && result="${src}/commands/${target}"
   done
   echo "${result}"
 }
@@ -190,29 +134,22 @@ _find_command() {
 #  CLI                                                                         #
 # --------------------------------------------------------------------------- #
 main() {
-  _require jq
-  _require curl
+  command -v jq &>/dev/null || _die "required: jq"
+  command -v curl &>/dev/null || _die "required: curl"
   mkdir -p "${HARNESS_HOME}" "${HARNESS_SESSIONS}"
-  _discover_sources
-
-  # Export env vars so command scripts inherit them
-  export HARNESS_ROOT HARNESS_HOME HARNESS_SESSIONS HARNESS_PROVIDER
-  export HARNESS_MODEL HARNESS_MAX_TURNS HARNESS_LOG HARNESS_VERSION
+  _refresh_sources
 
   local cmd="${1:-agent}"
   case "${cmd}" in --help|-h) cmd="help" ;; --version|-v) cmd="version" ;; esac
 
-  local cmd_path
-  cmd_path="$(_find_command "${cmd}")"
+  local cmd_path="$(_find_command "${cmd}")"
   if [[ -n "${cmd_path}" ]]; then
     shift || true
-    exec "${cmd_path}" "$@"
   else
-    # Not a known command — treat entire args as message to agent
-    cmd_path="$(_find_command "agent")"
+    cmd_path="$(_find_command "agent")" || true
     [[ -n "${cmd_path}" ]] || _die "no agent command found"
-    exec "${cmd_path}" "$@"
   fi
+  exec "${cmd_path}" "$@"
 }
 
 # Only run main when executed directly, not when sourced

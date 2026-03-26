@@ -19,7 +19,7 @@ _collect_tools_from() {
   done
 }
 
-_discover_sources
+_refresh_sources
 declare -A tool_map
 for src in "${_HARNESS_SOURCES[@]}"; do
   _collect_tools_from "${src}/tools" tool_map
