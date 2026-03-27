@@ -16,32 +16,59 @@ _resolve_provider() {
     for src in "${_HARNESS_SOURCES[@]}"; do
       [[ -d "${src}/providers" ]] || continue
       for f in "${src}/providers"/*; do
-        [[ -x "$f" ]] || continue
-        name="$(basename "$f")"
-        if "$f" --ready 2>/dev/null; then
-          HARNESS_PROVIDER="${name}"
-          break 2
+        if [[ -x "$f" ]]; then
+          name="$(basename "$f")"
+          if "$f" --ready 2>/dev/null; then
+            HARNESS_PROVIDER="${name}"
+            break 2
+          fi
+        elif [[ "$f" == *.conf ]]; then
+          name="$(basename "$f" .conf)"
+          # Variant ready: auth_env set or auth cache entry
+          local ae; ae="$(grep '^auth_env=' "$f" | head -1 | cut -d= -f2-)"
+          if [[ -n "${ae}" && -n "${!ae:-}" ]]; then
+            HARNESS_PROVIDER="${name}"; break 2
+          fi
+          local cache="${HARNESS_HOME}/.auth-cache.json"
+          if [[ -f "${cache}" ]] && jq -e ".\"${name}\" | length > 0" "${cache}" &>/dev/null; then
+            HARNESS_PROVIDER="${name}"; break 2
+          fi
         fi
       done
     done
   fi
   [[ -z "${HARNESS_PROVIDER}" ]] && return 0
-  # Get defaults from provider binary
-  local provider_path="" i
+
+  # Get defaults — variant conf or provider binary
+  local conf_file="" i
   for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
-    [[ -x "${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}" ]] && {
-      provider_path="${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}"
+    [[ -f "${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}.conf" ]] && {
+      conf_file="${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}.conf"
       break
     }
   done
-  [[ -z "${provider_path}" ]] && return 0
-  local key val
-  while IFS='=' read -r key val; do
-    [[ -z "${key}" ]] && continue
-    case "${key}" in
-      model) [[ -z "${HARNESS_MODEL}" ]] && HARNESS_MODEL="${val}" ;;
-    esac
-  done < <("${provider_path}" --defaults 2>/dev/null || true)
+
+  if [[ -n "${conf_file}" ]]; then
+    local model_val
+    model_val="$(grep '^model=' "${conf_file}" | head -1 | cut -d= -f2-)"
+    [[ -n "${model_val}" && -z "${HARNESS_MODEL}" ]] && HARNESS_MODEL="${model_val}"
+  else
+    local provider_path=""
+    for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
+      [[ -x "${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}" ]] && {
+        provider_path="${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}"
+        break
+      }
+    done
+    [[ -z "${provider_path}" ]] && return 0
+    local key val
+    while IFS='=' read -r key val; do
+      [[ -z "${key}" ]] && continue
+      case "${key}" in
+        model) [[ -z "${HARNESS_MODEL}" ]] && HARNESS_MODEL="${val}" ;;
+      esac
+    done < <("${provider_path}" --defaults 2>/dev/null || true)
+  fi
 }
 
 # --- Session helpers (inlined, private) ---

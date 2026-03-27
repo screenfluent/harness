@@ -19,8 +19,8 @@ ln -s ~/src/harness/bin/harness ~/.local/bin/hs  # alias
 ```bash
 # Set an API key for any discovered provider
 export ANTHROPIC_API_KEY="sk-ant-..."  # or
-export OPENAI_API_KEY="sk-..."        # or
-export ZAI_AUTH_TOKEN="..."
+export OPENAI_API_KEY="sk-..."        # or use a variant
+export GROQ_API_KEY="gsk_..."
 
 # One-shot: run an agent to completion
 hs "find all TODO comments in this repo and create a summary"
@@ -46,7 +46,7 @@ The core is a state follower (~100 SLOC). It does three things:
 
 3. **Follows states** until `next_state` is empty. The core has no built-in transitions — the topology `start → assemble → send → receive → (tool_exec → tool_done → assemble) → done` is emergent from which hooks exist and what `next_state` they emit.
 
-The loop has zero provider-specific knowledge. Message formats, API calls, response parsing — all of it lives in provider-specific hooks (`plugins/anthropic/`, `plugins/openai/`, `plugins/zai/`). Provider-agnostic behavior (tool execution, prompt loading, tool discovery) lives in `plugins/core/`. Additional bundled plugins provide subagent spawning (`plugins/subagents/`) and skill discovery (`plugins/skills/`).
+The loop has zero provider-specific knowledge. Message formats, API calls, response parsing — all of it lives in provider-specific hooks (`plugins/anthropic/`, `plugins/openai/`). Provider-agnostic behavior (tool execution, prompt loading, tool discovery) lives in `plugins/core/`. Additional bundled plugins provide subagent spawning (`plugins/subagents/`) and skill discovery (`plugins/skills/`).
 
 ## Plugin types
 
@@ -111,7 +111,33 @@ my-provider --env       # list supported env vars with descriptions
 
 If `HARNESS_PROVIDER` is not set, harness auto-selects the first discovered provider whose `--ready` exits 0, and loads its `--defaults` for unset vars like `HARNESS_MODEL`.
 
-Built-in: `anthropic`, `openai`, `zai`. Each lives in its own provider plugin directory (`plugins/anthropic/`, `plugins/openai/`, `plugins/zai/`) with provider-specific hooks for message assembly and response parsing. The `openai` provider works with any OpenAI-compatible API (ollama, llama.cpp, vLLM) — set `OPENAI_API_URL` to point at a local server. Writing a new provider means creating a plugin directory with the provider binary and format-translation hooks.
+Built-in: `anthropic`, `openai`. Each lives in its own provider plugin directory with provider-specific hooks for message assembly and response parsing. The `openai` provider works with any OpenAI-compatible API (ollama, llama.cpp, vLLM) — set `OPENAI_API_URL` to point at a local server.
+
+#### Provider variants
+
+Many services share the same API format — they just need a different URL and API key. Instead of writing a full provider plugin, create a `.conf` file:
+
+```
+protocol=openai
+description=Groq (OpenAI-compatible)
+model=openai/gpt-oss-120b
+url=https://api.groq.com/openai/v1/chat/completions
+auth_env=GROQ_API_KEY
+```
+
+Place it in any `providers/` directory (`~/.harness/providers/`, `.harness/providers/`, or a plugin's `providers/`). Harness resolves the conf to the protocol's provider binary, sets the right env vars, and runs the protocol's hooks — no symlinks or plugin directories needed.
+
+Bundled variants: `groq`, `deepseek` (OpenAI-compatible), `zai` (Anthropic-compatible).
+
+```bash
+# Use a variant
+export GROQ_API_KEY="gsk_..."
+HARNESS_PROVIDER=groq hs "hello"
+
+# Or store credentials persistently
+hs auth set groq
+HARNESS_PROVIDER=groq hs "hello"
+```
 
 See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plugin types.
 
@@ -126,7 +152,7 @@ See [docs/PROTOCOLS.md](docs/PROTOCOLS.md) for full protocol details on all plug
   commands/                  # global custom commands
   tools/                     # global custom tools
   hooks.d/                   # global hooks
-  providers/                 # global providers
+  providers/                 # global providers and variant confs
   sessions/                  # session storage (default)
 
 ~/project/AGENTS.md          # project-specific instructions (agents.md standard)

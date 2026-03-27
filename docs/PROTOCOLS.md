@@ -165,6 +165,36 @@ payload="$(cat)"
 # ... build request, call API, output response ...
 ```
 
+### Provider variants
+
+A **variant** is a config file that reuses an existing provider's protocol with different endpoint settings. This avoids duplicating provider scripts for services that share the same API format (e.g. Groq, DeepSeek, and other OpenAI-compatible endpoints).
+
+Variants are `.conf` files in any `providers/` directory, named `<variant>.conf`:
+
+```
+protocol=openai
+description=Groq (OpenAI-compatible)
+model=llama-3.3-70b-versatile
+url=https://api.groq.com/openai/v1/chat/completions
+auth_env=GROQ_API_KEY
+```
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `protocol` | yes | Base provider to invoke (`openai` or `anthropic`) |
+| `description` | no | Human-readable description |
+| `model` | no | Default model (populates `HARNESS_MODEL` if unset) |
+| `url` | no | API endpoint (sets `${PROTOCOL}_API_URL`) |
+| `auth_env` | no | Env var name for API key (falls back to auth cache under variant name) |
+
+**Resolution**: when `HARNESS_PROVIDER=groq`, harness looks for a `groq` executable first. Finding none, it looks for `groq.conf`, reads `protocol=openai`, sets the protocol's env vars from the conf, and invokes the `openai` provider binary.
+
+**Scoping**: the protocol provider's hooks (assemble, receive) run automatically — no symlinks needed.
+
+**Auth**: `hs auth set groq` stores credentials under the name `groq`. The variant resolution reads from the auth cache using the variant name.
+
+**Placement**: bundled variants live alongside their protocol (`plugins/openai/providers/groq.conf`). User-defined variants go in `~/.harness/providers/` or a project's `.harness/providers/`.
+
 ## Hooks
 
 Hooks are executables in `hooks.d/<stage>/` directories. They form a pipeline: each hook's stdout feeds the next hook's stdin. Named `NN-name` where `NN` is a two-digit sort key controlling execution order.

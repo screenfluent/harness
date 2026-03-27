@@ -64,7 +64,7 @@ Override either by placing a same-named hook in a higher-priority source dir.
 
 **Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `start`, `assemble`, `send`, `receive`, `tool_exec`, `tool_done`, `error`, `done`.
 
-**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `openai`, `zai`.
+**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `openai`. **Variants** are `.conf` files that reuse a provider's protocol with different endpoint config (url, auth, model). Bundled variants: `groq`, `deepseek` (OpenAI-compatible), `zai` (Anthropic-compatible).
 
 **Prompts** (`AGENTS.md` + `prompts/*.md`): `AGENTS.md` files follow the [agents.md standard](https://agents.md) — placed at the project root (parent of `.harness/`), not inside it. The `30-prompts` assemble hook concatenates them (global first, local last). Additional prompt fragments go in `.harness/prompts/*.md`.
 
@@ -85,7 +85,8 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 - `plugins/anthropic/providers/anthropic` — Anthropic API call
 - `plugins/openai/hooks.d/` — OpenAI-specific hooks (assemble/messages, receive/save)
 - `plugins/openai/providers/openai` — OpenAI-compatible API call (works with ollama, llama.cpp, vLLM)
-- `plugins/zai/` — z.ai provider (Anthropic-compatible, hooks symlinked to anthropic)
+- `plugins/openai/providers/*.conf` — OpenAI-compatible variants (groq, deepseek)
+- `plugins/anthropic/providers/*.conf` — Anthropic-compatible variants (zai)
 - `plugins/core/tools/` — five built-in tools
 - `plugins/subagents/` — `agent` tool + prompt fragment for spawning child sessions
 - `plugins/skills/` — `skill` tool + `25-skills` assemble hook for skill discovery
