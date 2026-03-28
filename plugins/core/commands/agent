@@ -11,6 +11,18 @@ source "${HARNESS_ROOT}/bin/harness"
 _resolve_provider() {
   # With HARNESS_PROVIDER empty, sources hooks include all provider plugins
   _refresh_sources
+
+  # Apply settings.conf from sources (most-local wins, env vars override)
+  local i v
+  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
+    [[ -f "${_HARNESS_SOURCES[i]}/settings.conf" ]] || continue
+    v="$(sed -n 's/^provider=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
+    if [[ -n "${v}" && -z "${HARNESS_PROVIDER}" ]]; then HARNESS_PROVIDER="${v}"; fi
+    v="$(sed -n 's/^model=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
+    if [[ -n "${v}" && -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${v}"; fi
+    break
+  done
+
   if [[ -z "${HARNESS_PROVIDER}" ]]; then
     local src f name
     for src in "${_HARNESS_SOURCES[@]}"; do
@@ -51,7 +63,7 @@ _resolve_provider() {
   if [[ -n "${conf_file}" ]]; then
     local model_val
     model_val="$(grep '^model=' "${conf_file}" | head -1 | cut -d= -f2-)"
-    [[ -n "${model_val}" && -z "${HARNESS_MODEL}" ]] && HARNESS_MODEL="${model_val}"
+    if [[ -n "${model_val}" && -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${model_val}"; fi
   else
     local provider_path=""
     for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
@@ -65,7 +77,7 @@ _resolve_provider() {
     while IFS='=' read -r key val; do
       [[ -z "${key}" ]] && continue
       case "${key}" in
-        model) [[ -z "${HARNESS_MODEL}" ]] && HARNESS_MODEL="${val}" ;;
+        model) if [[ -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${val}"; fi ;;
       esac
     done < <("${provider_path}" --defaults 2>/dev/null || true)
   fi
