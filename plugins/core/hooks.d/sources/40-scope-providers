@@ -24,8 +24,11 @@ while IFS= read -r dir; do
   if [[ -d "${dir}/providers" ]]; then
     dir_base="$(basename "${dir}")"
     if [[ -x "${dir}/providers/${dir_base}" || -f "${dir}/providers/${dir_base}.conf" ]]; then
-      # Provider-plugin dir — keep only if it matches provider or protocol
-      [[ "${dir_base}" != "${HARNESS_PROVIDER}" && "${dir_base}" != "${protocol}" ]] && continue
+      # Provider-plugin dir — keep if it matches provider or protocol,
+      # or if it contains the active provider binary/conf
+      if [[ "${dir_base}" != "${HARNESS_PROVIDER}" && "${dir_base}" != "${protocol}" ]]; then
+        [[ -x "${dir}/providers/${HARNESS_PROVIDER}" || -f "${dir}/providers/${HARNESS_PROVIDER}.conf" ]] || continue
+      fi
     fi
   fi
   filtered+=("${dir}")
