@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# 10-claude-oauth — OAuth2 PKCE login for Claude.ai
+set -euo pipefail
+
+input="$(cat)"
+
+# Pass through if another hook already produced a credential
+if echo "${input}" | jq -e 'has("type")' &>/dev/null; then
+  echo "${input}"
+  exit 0
+fi
+
+# Only handle claude provider
+[[ "${HARNESS_AUTH_PROVIDER:-}" == "claude" ]] || { echo "${input}"; exit 0; }
+
+# --- constants ---
+client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+redirect_uri="https://platform.claude.com/oauth/code/callback"
+auth_url="https://claude.ai/oauth/authorize"
+token_url="https://platform.claude.com/v1/oauth/token"
+scope="org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers"
+
+# --- helpers ---
+base64url_encode() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+
+# --- PKCE ---
+code_verifier="$(openssl rand 32 | base64url_encode)"
+code_challenge="$(printf '%s' "${code_verifier}" | openssl dgst -sha256 -binary | base64url_encode)"
+
+# --- build authorization URL ---
+url="${auth_url}?code=true"
+url+="&client_id=${client_id}"
+url+="&response_type=code"
+url+="&redirect_uri=$(printf '%s' "${redirect_uri}" | jq -sRr @uri)"
+url+="&scope=$(printf '%s' "${scope}" | jq -sRr @uri)"
+url+="&code_challenge=${code_challenge}"
+url+="&code_challenge_method=S256"
+url+="&state=${code_verifier}"
+
+echo "opening browser for Claude login..." >&2
+echo "${url}" >&2
+
+if command -v xdg-open &>/dev/null; then
+  xdg-open "${url}" >/dev/null 2>&1 &
+elif command -v open &>/dev/null; then
+  open "${url}" >/dev/null 2>&1 &
+fi
+
+# --- prompt user to paste authorization code ---
+echo >&2
+echo "after completing login, paste the authorization code:" >&2
+echo "(format: CODE#STATE from the page, or the full redirect URL)" >&2
+read -r user_input < /dev/tty
+
+# Extract code and state — handle: code#state, full URL, or bare code
+auth_code=""
+callback_state=""
+if [[ "${user_input}" == http* ]]; then
+  # Parse code and state from redirect URL query string
+  auth_code="$(printf '%s' "${user_input}" | sed -n 's/.*[?&]code=\([^&#]*\).*/\1/p')"
+  callback_state="$(printf '%s' "${user_input}" | sed -n 's/.*[?&]state=\([^&#]*\).*/\1/p')"
+elif [[ "${user_input}" == *"#"* ]]; then
+  # code#state format (what the callback page shows)
+  auth_code="${user_input%%#*}"
+  callback_state="${user_input##*#}"
+else
+  auth_code="${user_input}"
+  callback_state="${code_verifier}"
+fi
+
+[[ -z "${auth_code}" ]] && { echo "no authorization code provided" >&2; exit 1; }
+[[ -z "${callback_state}" ]] && callback_state="${code_verifier}"
+
+echo "received authorization code" >&2
+
+# --- exchange code for tokens ---
+token_response="$(curl -sS -X POST "${token_url}" \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n \
+    --arg grant_type "authorization_code" \
+    --arg client_id "${client_id}" \
+    --arg code "${auth_code}" \
+    --arg state "${callback_state}" \
+    --arg redirect_uri "${redirect_uri}" \
+    --arg code_verifier "${code_verifier}" \
+    '{grant_type: $grant_type, client_id: $client_id, code: $code, state: $state, redirect_uri: $redirect_uri, code_verifier: $code_verifier}')" \
+  --max-time 30)"
+
+if [[ -z "${token_response}" ]] || echo "${token_response}" | jq -e '.error' &>/dev/null; then
+  echo "token exchange failed: ${token_response}" >&2
+  exit 1
+fi
+
+access_token="$(echo "${token_response}" | jq -r '.access_token')"
+refresh_token="$(echo "${token_response}" | jq -r '.refresh_token')"
+expires_in="$(echo "${token_response}" | jq -r '.expires_in')"
+
+[[ "${access_token}" == "null" || -z "${access_token}" ]] && { echo "no access_token in token response" >&2; exit 1; }
+
+# --- compute expiry ---
+expires_at=""
+if [[ "${expires_in}" != "null" && -n "${expires_in}" ]]; then
+  expires_at="$(( $(date +%s) + expires_in ))"
+fi
+
+echo "logged in successfully" >&2
+
+# --- output credential JSON ---
+jq -n \
+  --arg access_token "${access_token}" \
+  --arg refresh_token "${refresh_token}" \
+  --arg expires_at "${expires_at}" \
+  '{
+    type: "oauth",
+    access_token: $access_token,
+    refresh_token: $refresh_token,
+    expires_at: $expires_at
+  }'

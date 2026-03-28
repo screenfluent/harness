@@ -64,7 +64,7 @@ Override either by placing a same-named hook in a higher-priority source dir.
 
 **Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `start`, `assemble`, `send`, `receive`, `tool_exec`, `tool_done`, `error`, `done`.
 
-**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `openai`, `chatgpt`. The `chatgpt` provider uses OAuth2 PKCE to authenticate with ChatGPT accounts (Plus/Pro/Team/Enterprise) and speaks the Responses API via SSE streaming to `chatgpt.com/backend-api/codex/responses`. **Variants** are `.conf` files that reuse a provider's protocol with different endpoint config (url, auth, model). Bundled variants: `groq`, `deepseek` (OpenAI-compatible), `zai` (Anthropic-compatible).
+**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `openai`, `chatgpt`, `claude`. The `chatgpt` provider uses OAuth2 PKCE to authenticate with ChatGPT accounts (Plus/Pro/Team/Enterprise) and speaks the Responses API via SSE streaming to `chatgpt.com/backend-api/codex/responses`. The `claude` provider uses OAuth2 PKCE to authenticate with Claude.ai subscriptions (Pro/Team/Enterprise) and calls the standard Messages API with Bearer auth. **Variants** are `.conf` files that reuse a provider's protocol with different endpoint config (url, auth, model). Bundled variants: `groq`, `deepseek` (OpenAI-compatible), `zai` (Anthropic-compatible).
 
 **Prompts** (`AGENTS.md` + `prompts/*.md`): `AGENTS.md` files follow the [agents.md standard](https://agents.md) — placed at the project root (parent of `.harness/`), not inside it. The `30-prompts` assemble hook concatenates them (global first, local last). Additional prompt fragments go in `.harness/prompts/*.md`.
 
@@ -82,7 +82,8 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 - `plugins/core/commands/` — built-in CLI commands (agent, session, tools, hooks, help, version)
 - `plugins/core/hooks.d/` — provider-agnostic hooks (send, tool_exec, tool_done, assemble/tools, assemble/prompts)
 - `plugins/anthropic/hooks.d/` — Anthropic-specific hooks (assemble/messages, receive/save)
-- `plugins/anthropic/providers/anthropic` — Anthropic API call
+- `plugins/anthropic/providers/anthropic` — Anthropic API call (API key)
+- `plugins/anthropic/providers/claude` — Claude.ai OAuth (Bearer auth, shares anthropic hooks)
 - `plugins/openai/hooks.d/` — OpenAI-specific hooks (assemble/messages, receive/save)
 - `plugins/openai/providers/openai` — OpenAI-compatible API call (works with ollama, llama.cpp, vLLM)
 - `plugins/openai/providers/*.conf` — OpenAI-compatible variants (groq, deepseek)

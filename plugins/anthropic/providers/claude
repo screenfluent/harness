@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# claude — provider plugin for the Anthropic Messages API with Claude.ai OAuth.
+# Receives assembled payload JSON on stdin, outputs the API response.
+set -euo pipefail
+
+[[ "${1:-}" == "--describe" ]] && { echo "Claude.ai (OAuth)"; exit 0; }
+[[ "${1:-}" == "--ready" ]] && {
+  cache="${HARNESS_HOME:-${HOME}/.harness}/.auth-cache.json"
+  [[ -f "${cache}" ]] && jq -e '.claude | length > 0' "${cache}" &>/dev/null
+  exit $?
+}
+[[ "${1:-}" == "--defaults" ]] && { echo "model=claude-sonnet-4-20250514"; exit 0; }
+[[ "${1:-}" == "--env" ]] && { cat <<'ENVEOF'
+ANTHROPIC_MAX_TOKENS  max response tokens (8192)
+ENVEOF
+exit 0; }
+
+cache="${HARNESS_HOME:-${HOME}/.harness}/.auth-cache.json"
+[[ -f "${cache}" ]] || { echo "no auth cache — run: hs auth set claude" >&2; exit 1; }
+
+# Read credentials
+access_token="$(jq -r '.claude[0].access_token // empty' "${cache}")"
+refresh_token="$(jq -r '.claude[0].refresh_token // empty' "${cache}")"
+expires_at="$(jq -r '.claude[0].expires_at // "0"' "${cache}")"
+
+[[ -z "${access_token}" ]] && { echo "no claude access_token — run: hs auth set claude" >&2; exit 1; }
+
+# Refresh token if expired
+now="$(date +%s)"
+if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "${expires_at}" ]]; then
+  token_response="$(curl -sS -X POST "https://platform.claude.com/v1/oauth/token" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+      --arg client_id "9d1c250a-e61b-44d9-88ed-5944d1962f5e" \
+      --arg refresh_token "${refresh_token}" \
+      '{client_id: $client_id, grant_type: "refresh_token", refresh_token: $refresh_token}'
+    )" --max-time 30)" || { echo "token refresh failed" >&2; exit 1; }
+
+  new_access="$(echo "${token_response}" | jq -r '.access_token // empty')"
+  [[ -z "${new_access}" ]] && { echo "token refresh returned no access_token" >&2; exit 1; }
+
+  new_refresh="$(echo "${token_response}" | jq -r '.refresh_token // empty')"
+  expires_in="$(echo "${token_response}" | jq -r '.expires_in // "0"')"
+  new_expires_at="$(( $(date +%s) + expires_in ))"
+
+  access_token="${new_access}"
+  [[ -n "${new_refresh}" && "${new_refresh}" != "null" ]] && refresh_token="${new_refresh}"
+
+  # Update auth cache
+  updated="$(jq \
+    --arg at "${access_token}" \
+    --arg rt "${refresh_token}" \
+    --arg exp "${new_expires_at}" \
+    '.claude[0].access_token = $at
+     | .claude[0].refresh_token = $rt
+     | .claude[0].expires_at = $exp' "${cache}")"
+  echo "${updated}" > "${cache}"
+  chmod 600 "${cache}"
+  echo "refreshed claude token" >&2
+fi
+
+ANTHROPIC_MAX_TOKENS="${ANTHROPIC_MAX_TOKENS:-8192}"
+
+payload="$(cat)"
+
+# Extract fields from the assembled payload
+model="$(echo "${payload}" | jq -r '.model // ""')"
+[[ -z "${model}" ]] && model="${HARNESS_MODEL}"
+
+system="$(echo "${payload}" | jq -r '.system // ""')"
+messages="$(echo "${payload}" | jq -c '.messages // []')"
+tools="$(echo "${payload}" | jq -c '.tools // []')"
+
+# Build system as array of content blocks with Claude Code identity prepended
+identity='You are Claude Code, Anthropic'\''s official CLI for Claude.'
+if [[ -n "${system}" ]]; then
+  system_blocks="$(jq -n \
+    --arg identity "${identity}" \
+    --arg system "${system}" \
+    '[{type: "text", text: $identity, cache_control: {type: "ephemeral"}},
+      {type: "text", text: $system, cache_control: {type: "ephemeral"}}]'
+  )"
+else
+  system_blocks="$(jq -n \
+    --arg identity "${identity}" \
+    '[{type: "text", text: $identity, cache_control: {type: "ephemeral"}}]'
+  )"
+fi
+
+# Build the API request body
+request="$(jq -n \
+  --arg model "${model}" \
+  --argjson max_tokens "${ANTHROPIC_MAX_TOKENS}" \
+  --argjson system "${system_blocks}" \
+  --argjson messages "${messages}" \
+  --argjson tools "${tools}" \
+  '{model: $model, max_tokens: $max_tokens, system: $system, messages: $messages}
+   | if ($tools | length) > 0 then . + {tools: $tools} else . end'
+)"
+
+# Call the API
+response="$(curl -sS "https://api.anthropic.com/v1/messages" \
+  -H "Authorization: Bearer ${access_token}" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: claude-code-20250219,oauth-2025-04-20" \
+  -H "user-agent: claude-cli/2.1.62" \
+  -H "x-app: cli" \
+  -H "content-type: application/json" \
+  -d "${request}" \
+  --max-time 300
+)"
+
+# Check for API errors
+error_type="$(echo "${response}" | jq -r '.type // ""')"
+if [[ "${error_type}" == "error" ]]; then
+  error_msg="$(echo "${response}" | jq -r '.error.message // "unknown error"')"
+  echo "claude API error: ${error_msg}" >&2
+  exit 1
+fi
+
+# Pass through the raw response
+echo "${response}"
