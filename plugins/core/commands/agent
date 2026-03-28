@@ -13,13 +13,17 @@ _resolve_provider() {
   _refresh_sources
 
   # Apply settings.conf from sources (most-local wins, env vars override)
-  local i v
+  # Model from settings only applies when settings also set the provider —
+  # an env-var provider override implies the paired model doesn't apply.
+  local i v provider_from_env="${HARNESS_PROVIDER}"
   for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
     [[ -f "${_HARNESS_SOURCES[i]}/settings.conf" ]] || continue
     v="$(sed -n 's/^provider=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
     if [[ -n "${v}" && -z "${HARNESS_PROVIDER}" ]]; then HARNESS_PROVIDER="${v}"; fi
-    v="$(sed -n 's/^model=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
-    if [[ -n "${v}" && -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${v}"; fi
+    if [[ -z "${provider_from_env}" ]]; then
+      v="$(sed -n 's/^model=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
+      if [[ -n "${v}" && -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${v}"; fi
+    fi
     break
   done
 
