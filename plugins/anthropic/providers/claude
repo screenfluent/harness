@@ -6,7 +6,10 @@ set -euo pipefail
 [[ "${1:-}" == "--describe" ]] && { echo "Claude.ai (OAuth)"; exit 0; }
 [[ "${1:-}" == "--ready" ]] && {
   cache="${HARNESS_HOME:-${HOME}/.harness}/.auth-cache.json"
-  [[ -f "${cache}" ]] && jq -e '.claude | length > 0' "${cache}" &>/dev/null
+  [[ -f "${cache}" ]] || exit 1
+  jq -e '.claude | length > 0' "${cache}" &>/dev/null || exit 1
+  exp="$(jq -r '.claude[0].expires_at // "0"' "${cache}")"
+  [[ "${exp}" == "0" ]] || [[ "$(date +%s)" -lt "${exp}" ]]
   exit $?
 }
 [[ "${1:-}" == "--defaults" ]] && { echo "model=claude-sonnet-4-6"; exit 0; }

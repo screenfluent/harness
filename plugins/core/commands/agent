@@ -43,13 +43,19 @@ _resolve_provider() {
           fi
           local cache="${HARNESS_HOME}/.auth-cache.json"
           if [[ -f "${cache}" ]] && jq -e ".\"${name}\" | length > 0" "${cache}" &>/dev/null; then
-            HARNESS_PROVIDER="${name}"; break 2
+            local exp; exp="$(jq -r ".\"${name}\"[0].expires_at // \"0\"" "${cache}")"
+            if [[ "${exp}" == "0" ]] || [[ "$(date +%s)" -lt "${exp}" ]]; then
+              HARNESS_PROVIDER="${name}"; break 2
+            fi
           fi
         fi
       done
     done
   fi
-  [[ -z "${HARNESS_PROVIDER}" ]] && return 0
+  if [[ -z "${HARNESS_PROVIDER}" ]]; then
+    echo "harness: no ready provider found — set HARNESS_PROVIDER or run: hs auth set <provider>" >&2
+    exit 1
+  fi
 
   # Get defaults — variant conf or provider binary
   local conf_file="" i
