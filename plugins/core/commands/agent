@@ -133,8 +133,9 @@ _show_info() {
   IFS=':' read -ra _srcs <<< "${HARNESS_SOURCES:-}"
   for _s in "${_srcs[@]}"; do
     [[ -d "${_s}/prompts" ]] || continue
-    for _p in "${_s}/prompts/"*.md 2>/dev/null; do
-      [[ -f "${_p}" ]] && printf '  prompt:   %s\n' "${_p}"
+    for _p in "${_s}/prompts/"*.md; do
+      [[ -f "${_p}" ]] || continue
+      printf '  prompt:   %s\n' "${_p}"
     done
   done
 
