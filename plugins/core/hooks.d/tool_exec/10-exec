@@ -69,14 +69,27 @@ fi
       ;;
     str_replace)
       _path="$(echo "${input}" | jq -r '.path // empty')"
-      _old="$(echo "${input}" | jq -r '.old_str // empty')"
-      _new="$(echo "${input}" | jq -r '.new_str // empty')"
       printf ' \033[36m%s\033[0m\n' "${_path}"
-      # Show diff-style old/new (truncate long strings)
-      if (( ${#_old} > 120 )); then _old="${_old:0:120}…"; fi
-      if (( ${#_new} > 120 )); then _new="${_new:0:120}…"; fi
-      printf '\033[2m  │ \033[31m- %s\033[0m\n' "${_old}"
-      printf '\033[2m  │ \033[32m+ %s\033[0m\n' "${_new}"
+      # Show diff-style old/new for each edit
+      _has_edits="$(echo "${input}" | jq 'has("edits") and (.edits | length > 0)')"
+      if [[ "${_has_edits}" == "true" ]]; then
+        _edit_count="$(echo "${input}" | jq '.edits | length')"
+        for (( _ei=0; _ei<_edit_count; _ei++ )); do
+          _old="$(echo "${input}" | jq -r ".edits[${_ei}].old_str // empty")"
+          _new="$(echo "${input}" | jq -r ".edits[${_ei}].new_str // empty")"
+          if (( ${#_old} > 120 )); then _old="${_old:0:120}…"; fi
+          if (( ${#_new} > 120 )); then _new="${_new:0:120}…"; fi
+          printf '\033[2m  │ \033[31m- %s\033[0m\n' "${_old}"
+          printf '\033[2m  │ \033[32m+ %s\033[0m\n' "${_new}"
+        done
+      else
+        _old="$(echo "${input}" | jq -r '.old_str // empty')"
+        _new="$(echo "${input}" | jq -r '.new_str // empty')"
+        if (( ${#_old} > 120 )); then _old="${_old:0:120}…"; fi
+        if (( ${#_new} > 120 )); then _new="${_new:0:120}…"; fi
+        printf '\033[2m  │ \033[31m- %s\033[0m\n' "${_old}"
+        printf '\033[2m  │ \033[32m+ %s\033[0m\n' "${_new}"
+      fi
       ;;
   esac
   if [[ "${tool_name}" != "str_replace" ]]; then

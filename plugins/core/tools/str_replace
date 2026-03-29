@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# str_replace — tool plugin: replace a unique string in a file.
+# str_replace — tool plugin: replace unique strings in a file.
 set -euo pipefail
 
 case "${1:-}" in
@@ -7,7 +7,7 @@ case "${1:-}" in
     cat <<'JSON'
 {
   "name": "str_replace",
-  "description": "Replace a unique string in a file with another string. The old_str must appear exactly once in the file. Use for targeted edits without rewriting the entire file.",
+  "description": "Replace unique strings in a file. Supports single replacement (old_str/new_str) or multiple replacements (edits array). Each old_str must appear exactly once in the file. All edits are validated against the original file before any are applied.",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -17,14 +17,26 @@ case "${1:-}" in
       },
       "old_str": {
         "type": "string",
-        "description": "Exact string to find (must be unique in the file)"
+        "description": "Exact string to find (must be unique). Use this for single edits."
       },
       "new_str": {
         "type": "string",
-        "description": "Replacement string (empty string to delete)"
+        "description": "Replacement string (empty string to delete). Use with old_str."
+      },
+      "edits": {
+        "type": "array",
+        "description": "Multiple replacements. Each edit has old_str and new_str. All validated before applying. Use this instead of old_str/new_str for multiple changes.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "old_str": { "type": "string", "description": "Exact string to find (must be unique)" },
+            "new_str": { "type": "string", "description": "Replacement string" }
+          },
+          "required": ["old_str", "new_str"]
+        }
       }
     },
-    "required": ["path", "old_str", "new_str"]
+    "required": ["path"]
   }
 }
 JSON
@@ -35,8 +47,6 @@ JSON
   --exec)
     input="$(cat)"
     path="$(echo "${input}" | jq -r '.path')"
-    old_str="$(echo "${input}" | jq -r '.old_str')"
-    new_str="$(echo "${input}" | jq -r '.new_str')"
 
     if [[ "${path}" != /* ]]; then
       path="${HARNESS_CWD:-${PWD}}/${path}"
@@ -47,33 +57,48 @@ JSON
       exit 1
     fi
 
-    # Count occurrences
-    count="$(grep -cF "${old_str}" "${path}" 2>/dev/null)" || count=0
-    if (( count == 0 )); then
-      echo "error: old_str not found in ${path}"
-      exit 1
-    fi
-    if (( count > 1 )); then
-      echo "error: old_str appears ${count} times in ${path} (must be unique)"
-      exit 1
+    # Normalize: single old_str/new_str → edits array
+    has_edits="$(echo "${input}" | jq 'has("edits") and (.edits | length > 0)')"
+    if [[ "${has_edits}" == "true" ]]; then
+      edits_json="$(echo "${input}" | jq -c '.edits')"
+    else
+      edits_json="$(echo "${input}" | jq -c '[{old_str: .old_str, new_str: .new_str}]')"
     fi
 
-    # Perform replacement using python for safe string handling
-    # Pass old_str and new_str via env to avoid shell quoting issues
-    REPLACE_PATH="${path}" OLD_STR="${old_str}" NEW_STR="${new_str}" python3 -c "
-import os
+    # Validate + apply all edits in python
+    REPLACE_PATH="${path}" EDITS_JSON="${edits_json}" python3 -c "
+import os, json, sys
+
 path = os.environ['REPLACE_PATH']
-old = os.environ['OLD_STR']
-new = os.environ['NEW_STR']
-with open(path) as f: content = f.read()
-content = content.replace(old, new, 1)
-with open(path, 'w') as f: f.write(content)
-" 2>/dev/null || {
-      echo "error: replacement failed (need python3)"
-      exit 1
-    }
+edits = json.loads(os.environ['EDITS_JSON'])
 
-    echo "replaced in ${path}"
+with open(path) as f:
+    content = f.read()
+
+# Validate all edits against original content first
+errors = []
+for i, edit in enumerate(edits):
+    old = edit['old_str']
+    count = content.count(old)
+    if count == 0:
+        errors.append(f'edit {i+1}: old_str not found')
+    elif count > 1:
+        errors.append(f'edit {i+1}: old_str appears {count} times (must be unique)')
+
+if errors:
+    print('\\n'.join(errors))
+    sys.exit(1)
+
+# Apply edits sequentially
+for edit in edits:
+    content = content.replace(edit['old_str'], edit['new_str'], 1)
+
+with open(path, 'w') as f:
+    f.write(content)
+
+n = len(edits)
+print(f'{n} edit{\"s\" if n > 1 else \"\"} applied to {path}')
+" || exit 1
     ;;
   *)
     echo "usage: str_replace --schema | --describe | --exec" >&2
