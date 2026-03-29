@@ -5,6 +5,10 @@ Phase 1: Replace old tool_result content with one-line summaries.
 Phase 2: When enough old turns exist, call observer LLM to compress
          them into a dense observation log. Cache the result on disk.
 
+Key design: Phase 2 gets FULL tool results (not Phase 1 summaries)
+so the observer can capture file knowledge. Phase 1 only runs as
+fallback when Phase 2 is disabled or not triggered.
+
 Reads JSON payload from stdin, writes modified JSON to stdout.
 Logs to stderr.
 """
@@ -25,7 +29,6 @@ if not messages:
     sys.exit(0)
 
 # ── Find the keep boundary ──────────────────────────────────────────
-# Count real user turns (string content) from the end.
 turn_count = 0
 keep_from = 0
 
@@ -41,8 +44,7 @@ if keep_from == 0:
     print(json.dumps(payload))
     sys.exit(0)
 
-# ── Phase 1: Trim old tool results ─────────────────────────────────
-# Build map: tool_use_id → {name, input} from old assistant messages
+# ── Build tool_use map for old messages ─────────────────────────────
 tool_use_map = {}
 for i in range(0, keep_from):
     msg = messages[i]
@@ -85,34 +87,13 @@ def summarize_tool(tool_use_id, result_content):
     else:
         return f"[{name}: {lines} lines]"
 
-trimmed_count = 0
-for i in range(0, keep_from):
-    msg = messages[i]
-    if msg.get("role") != "user":
-        continue
-    content = msg.get("content")
-    if not isinstance(content, list):
-        continue
-    for j, block in enumerate(content):
-        if block.get("type") == "tool_result":
-            original = block.get("content", "")
-            if len(original) > 200:
-                tid = block.get("tool_use_id", "")
-                messages[i]["content"][j]["content"] = summarize_tool(tid, original)
-                trimmed_count += 1
-
-if trimmed_count > 0:
-    print(f"[context] phase 1: trimmed {trimmed_count} old tool results", file=sys.stderr)
-
-# ── Phase 2: Observer — compress old turns into observation ─────────
-# Count old real user turns (before keep_from)
+# ── Decide: Phase 2 (observer) or Phase 1 (trim) ───────────────────
 old_turn_count = 0
 for i in range(0, keep_from):
     msg = messages[i]
     if msg.get("role") == "user" and isinstance(msg.get("content"), str):
         old_turn_count += 1
 
-# Check if we should observe
 should_observe = (
     old_turn_count >= observer_threshold
     and observer_key
@@ -120,26 +101,45 @@ should_observe = (
 )
 
 if not should_observe:
+    # ── Phase 1 only: trim old tool results ─────────────────────────
+    trimmed_count = 0
+    for i in range(0, keep_from):
+        msg = messages[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for j, block in enumerate(content):
+            if block.get("type") == "tool_result":
+                original = block.get("content", "")
+                if len(original) > 200:
+                    tid = block.get("tool_use_id", "")
+                    messages[i]["content"][j]["content"] = summarize_tool(tid, original)
+                    trimmed_count += 1
+
+    if trimmed_count > 0:
+        print(f"[context] phase 1: trimmed {trimmed_count} old tool results", file=sys.stderr)
+
     payload["messages"] = messages
     print(json.dumps(payload))
     sys.exit(0)
 
-# ── Check cache: have we already observed these turns? ──────────────
+# ── Phase 2: Observer — compress old turns into observation ─────────
 obs_dir = os.path.join(session_dir, "observations")
 os.makedirs(obs_dir, exist_ok=True)
 
-# Hash the old messages to detect if they changed since last observation
+# Hash the ORIGINAL old messages (full content) to detect changes
 old_msgs_json = json.dumps(messages[:keep_from], sort_keys=True)
 old_hash = hashlib.sha256(old_msgs_json.encode()).hexdigest()[:16]
 obs_file = os.path.join(obs_dir, f"obs-{old_hash}.md")
 
 if os.path.exists(obs_file):
-    # Use cached observation
     with open(obs_file) as f:
         observation = f.read()
     print(f"[context] phase 2: using cached observation ({old_turn_count} turns)", file=sys.stderr)
 else:
-    # Build transcript for the observer
+    # Build transcript from FULL messages (not trimmed!)
     transcript_lines = []
     for i in range(0, keep_from):
         msg = messages[i]
@@ -165,14 +165,15 @@ else:
                 elif btype == "tool_result":
                     tid = block.get("tool_use_id", "")
                     tc = block.get("content", "")
-                    if len(tc) > 500:
-                        tc = tc[:500] + f"... [{len(tc)} chars total]"
+                    # Truncate very large results for the observer transcript
+                    # but keep enough for knowledge extraction
+                    if len(tc) > 2000:
+                        tc = tc[:2000] + f"\n... [{len(tc)} chars total, truncated for observer]"
                     info = tool_use_map.get(tid, {"name": "?", "input": {}})
                     transcript_lines.append(f"[TOOL_RESULT ({info['name']})]: {tc}")
 
     transcript = "\n".join(transcript_lines)
 
-    # Observer prompt
     prompt = f"""Compress the transcript below into an observation log. Output the log directly — no thinking, no preamble, no explanation.
 
 Format:
@@ -197,7 +198,6 @@ Rules:
 ---
 {transcript}"""
 
-    # Call Gemini API
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{observer_model}:generateContent?key={observer_key}"
     api_body = json.dumps({
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -212,7 +212,7 @@ Rules:
             ["curl", "-s", api_url,
              "-H", "Content-Type: application/json",
              "-d", api_body],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=60
         )
         resp = json.loads(result.stdout)
         parts = resp.get("candidates", [{}])[0].get("content", {}).get("parts", [])
@@ -232,7 +232,6 @@ Rules:
             obs = "\n".join(obs.split("\n")[:-1])
         observation = obs.strip()
 
-        # Save to cache
         with open(obs_file, "w") as f:
             f.write(observation)
 
@@ -242,24 +241,38 @@ Rules:
         print(f"[context] phase 2: observed {old_turn_count} turns → {len(observation)} chars ({in_tok} in, {out_tok} out tokens)", file=sys.stderr)
 
     except Exception as e:
-        # Observation failed — fall back to Phase 1 only
-        print(f"[context] phase 2: observer failed: {e}", file=sys.stderr)
+        # Observer failed — fall back to Phase 1 trimming
+        print(f"[context] phase 2 failed ({e}), falling back to phase 1", file=sys.stderr)
+        trimmed_count = 0
+        for i in range(0, keep_from):
+            msg = messages[i]
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for j, block in enumerate(content):
+                if block.get("type") == "tool_result":
+                    original = block.get("content", "")
+                    if len(original) > 200:
+                        tid = block.get("tool_use_id", "")
+                        messages[i]["content"][j]["content"] = summarize_tool(tid, original)
+                        trimmed_count += 1
+        if trimmed_count > 0:
+            print(f"[context] phase 1 fallback: trimmed {trimmed_count} old tool results", file=sys.stderr)
         payload["messages"] = messages
         print(json.dumps(payload))
         sys.exit(0)
 
-# ── Assemble final payload: observation + recent messages ───────────
-# Replace old messages with a single user message containing the observation
+# ── Assemble: observation + recent messages ─────────────────────────
 obs_message = {
     "role": "user",
     "content": f"[Session history — compressed observation of earlier turns]\n\n{observation}"
 }
-# Need an assistant acknowledgment to keep alternation valid
 obs_ack = {
     "role": "assistant",
     "content": "Understood. I have the compressed session history. Continuing from where we left off."
 }
 
-# New messages = observation + recent turns
 payload["messages"] = [obs_message, obs_ack] + messages[keep_from:]
 print(json.dumps(payload))
