@@ -105,8 +105,11 @@ agent_loop() {
     (( ++iterations > HARNESS_MAX_TURNS * 3 )) && { _log "safety: exceeded max iterations"; break; }
   done
 
-  local output; output="$(echo "${result:-}" | jq -r '.output // empty' 2>/dev/null)" || true
-  [[ -n "${output}" ]] && printf '%s\n' "${output}" || true
+  # Print output unless streaming already displayed it
+  if [[ -z "${HARNESS_STREAM_FD:-}" ]]; then
+    local output; output="$(echo "${result:-}" | jq -r '.output // empty' 2>/dev/null)" || true
+    [[ -n "${output}" ]] && printf '%s\n' "${output}"
+  fi
 }
 
 # --------------------------------------------------------------------------- #

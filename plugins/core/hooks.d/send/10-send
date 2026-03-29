@@ -67,10 +67,8 @@ stream_flag=""
 # dispatcher reads the fifo, executes each tool in parallel, and writes
 # results to .tool_dispatch/. The tool_exec hook checks there before
 # re-executing, making pre-dispatched tools instant.
-dispatch_dir="${HARNESS_SESSION}/.tool_dispatch"
-rm -rf "${dispatch_dir}"
-mkdir -p "${dispatch_dir}"
 _dispatch_pid=""
+dispatch_dir=""
 
 _cleanup_dispatch() {
   [[ -n "${_dispatch_pid}" ]] || return 0
@@ -81,6 +79,10 @@ _cleanup_dispatch() {
 }
 
 if [[ -n "${stream_flag}" ]]; then
+  dispatch_dir="${HARNESS_SESSION}/.tool_dispatch"
+  rm -rf "${dispatch_dir}"
+  mkdir -p "${dispatch_dir}"
+
   _workdir="$(sed -n 's/^cwd=//p' "${HARNESS_SESSION}/session.conf" 2>/dev/null)"
   _workdir="${_workdir:-${PWD}}"
 
