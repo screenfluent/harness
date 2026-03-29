@@ -59,8 +59,12 @@ for f in $(ls -1 "${msg_dir}"/*.md 2>/dev/null | sort); do
       while IFS= read -r line; do
         if [[ "${line}" =~ ^\`\`\`tool_call\ id=([^ ]+)\ name=([^ ]+) ]]; then
           if [[ -n "${current_text}" ]]; then
-            content_blocks="$(echo "${content_blocks}" | jq --arg t "${current_text%$'\n'}" \
-              '. + [{type: "text", text: $t}]')"
+            _flush="${current_text%$'\n'}"
+            _flush_trimmed="${_flush//[$'\n\t ']/}"
+            if [[ -n "${_flush_trimmed}" ]]; then
+              content_blocks="$(echo "${content_blocks}" | jq --arg t "${_flush}" \
+                '. + [{type: "text", text: $t}]')"
+            fi
             current_text=""
           fi
           in_tool_block=true
