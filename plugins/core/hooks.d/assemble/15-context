@@ -1,121 +1,31 @@
 #!/usr/bin/env bash
-# 15-context — trim old tool results to reduce context window usage.
+# 15-context — two-tier context compression.
 #
-# Keeps the last N turns (user+assistant pairs) verbatim.
-# Older tool_result content is replaced with a one-line summary
-# describing what the tool did, preserving the structure so the
-# model knows what happened without the full output.
+# Phase 1: Trim old tool results to one-line summaries.
+# Phase 2: When enough old turns accumulate, call an observer LLM
+#           to compress them into a dense observation log. The log
+#           replaces old messages in the payload (files stay intact).
 #
-# Config: HARNESS_CONTEXT_KEEP_TURNS (default: 10)
+# Config:
+#   HARNESS_CONTEXT_KEEP_TURNS   — turns to keep verbatim (default: 10)
+#   HARNESS_OBSERVER_MODEL       — Gemini model for observation (default: gemini-3-flash-preview)
+#   HARNESS_OBSERVER_KEY         — Gemini API key (required for Phase 2)
+#   HARNESS_OBSERVER_THRESHOLD   — old turns needed to trigger observation (default: 5)
 set -euo pipefail
 
 payload="$(cat)"
-
 keep_turns="${HARNESS_CONTEXT_KEEP_TURNS:-10}"
+session_dir="${HARNESS_SESSION:-}"
+observer_model="${HARNESS_OBSERVER_MODEL:-gemini-3-flash-preview}"
+observer_key="${HARNESS_OBSERVER_KEY:-}"
+observer_threshold="${HARNESS_OBSERVER_THRESHOLD:-5}"
 
-# Use an external python script to avoid bash quoting issues
-result="$(echo "${payload}" | KEEP_TURNS="${keep_turns}" python3 -c '
-import json, os, sys
-
-payload = json.loads(sys.stdin.read())
-messages = payload.get("messages", [])
-keep_turns = int(os.environ.get("KEEP_TURNS", "10"))
-
-if not messages:
-    print(json.dumps(payload))
-    sys.exit(0)
-
-# Count turns from the end. A "turn" starts at a real user message
-# (string content, not a tool_result batch which is a list).
-turn_count = 0
-keep_from = 0
-
-for i in range(len(messages) - 1, -1, -1):
-    msg = messages[i]
-    if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-        turn_count += 1
-        if turn_count >= keep_turns:
-            keep_from = i
-            break
-
-# Nothing to trim
-if keep_from == 0:
-    print(json.dumps(payload))
-    sys.exit(0)
-
-# Build map: tool_use_id -> {name, input} from old assistant messages
-tool_use_map = {}
-for i in range(0, keep_from):
-    msg = messages[i]
-    if msg.get("role") != "assistant":
-        continue
-    content = msg.get("content")
-    if not isinstance(content, list):
-        continue
-    for block in content:
-        if block.get("type") == "tool_use":
-            tool_use_map[block["id"]] = {
-                "name": block.get("name", "unknown"),
-                "input": block.get("input", {})
-            }
-
-def summarize(tool_use_id, result_content):
-    info = tool_use_map.get(tool_use_id, {"name": "unknown", "input": {}})
-    name = info["name"]
-    inp = info["input"]
-    lines = result_content.count("\n") + 1 if result_content else 0
-
-    if name == "read_file":
-        path = inp.get("path", "?")
-        return f"[read: {path}, {lines} lines]"
-    elif name == "write_file":
-        path = inp.get("path", "?")
-        size = len(inp.get("content", ""))
-        return f"[wrote: {path}, {size} bytes]"
-    elif name == "str_replace":
-        path = inp.get("path", "?")
-        edits = inp.get("edits")
-        if edits:
-            return f"[edited: {path}, {len(edits)} edits]"
-        return f"[edited: {path}]"
-    elif name == "bash":
-        cmd = inp.get("command", "?")
-        if len(cmd) > 60:
-            cmd = cmd[:60] + "..."
-        return f"[ran: {cmd}, {lines} lines output]"
-    elif name == "list_dir":
-        path = inp.get("path", "?")
-        return f"[listed: {path}, {lines} lines]"
-    elif name == "agent":
-        prompt = inp.get("prompt", "?")
-        if len(prompt) > 60:
-            prompt = prompt[:60] + "..."
-        return f"[subagent: {prompt}]"
-    else:
-        return f"[{name}: {lines} lines]"
-
-# Trim old tool results (only if content > 200 chars)
-trimmed_count = 0
-for i in range(0, keep_from):
-    msg = messages[i]
-    if msg.get("role") != "user":
-        continue
-    content = msg.get("content")
-    if not isinstance(content, list):
-        continue
-    for j, block in enumerate(content):
-        if block.get("type") == "tool_result":
-            original = block.get("content", "")
-            if len(original) > 200:
-                tid = block.get("tool_use_id", "")
-                messages[i]["content"][j]["content"] = summarize(tid, original)
-                trimmed_count += 1
-
-payload["messages"] = messages
-print(json.dumps(payload))
-
-if trimmed_count > 0:
-    print(f"[context] trimmed {trimmed_count} old tool results", file=sys.stderr)
-' 2>>"${HARNESS_LOG}")" || { echo "${payload}"; exit 0; }
+result="$(echo "${payload}" | \
+  KEEP_TURNS="${keep_turns}" \
+  SESSION_DIR="${session_dir}" \
+  OBSERVER_MODEL="${observer_model}" \
+  OBSERVER_KEY="${observer_key}" \
+  OBSERVER_THRESHOLD="${observer_threshold}" \
+  python3 "$(dirname "$0")/15-context.py")" || { echo "${payload}"; exit 0; }
 
 echo "${result}"
