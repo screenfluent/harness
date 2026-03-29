@@ -39,10 +39,13 @@ if [[ -z "${provider_bin}" ]]; then
     protocol="$(grep '^protocol=' "${conf}" | head -1 | cut -d= -f2-)"
     url="$(grep '^url=' "${conf}" | head -1 | cut -d= -f2-)"
     auth_env="$(grep '^auth_env=' "${conf}" | head -1 | cut -d= -f2-)"
+    max_tokens="$(grep '^max_tokens=' "${conf}" | head -1 | cut -d= -f2-)"
+    stream_conf="$(grep '^stream=' "${conf}" | head -1 | cut -d= -f2-)"
     provider_bin="$(_find_bin "${protocol}")"
     # Map variant config to protocol env vars
     proto_upper="$(echo "${protocol}" | tr '[:lower:]' '[:upper:]')"
     [[ -n "${url}" ]] && export "${proto_upper}_API_URL=${url}"
+    [[ -n "${max_tokens}" ]] && export "${proto_upper}_MAX_TOKENS=${max_tokens}"
     key=""
     [[ -n "${auth_env}" ]] && key="${!auth_env:-}"
     if [[ -z "${key}" ]]; then
@@ -58,9 +61,9 @@ if [[ -z "${provider_bin}" ]]; then
   exit 1
 fi
 
-# Stream flag: pass --stream when streaming fd is active
+# Stream flag: pass --stream when streaming fd is active or variant requires it
 stream_flag=""
-[[ -n "${HARNESS_STREAM_FD:-}" ]] && stream_flag="--stream"
+[[ -n "${HARNESS_STREAM_FD:-}" || "${stream_conf:-}" == "always" ]] && stream_flag="--stream"
 
 # --- Parallel tool dispatch during streaming ---
 # Tools are dispatched via a fifo as the provider streams them. A background

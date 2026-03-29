@@ -72,9 +72,9 @@ if [[ "${streaming}" == true ]]; then
   while IFS= read -r line; do
     # Skip blank lines and event: lines
     [[ -z "${line}" || "${line}" =~ ^event: ]] && continue
-    # Only process data: lines
-    [[ "${line}" =~ ^data:\ (.*) ]] || continue
-    data="${BASH_REMATCH[1]}"
+    # Only process data: lines (space after colon is optional per SSE spec)
+    [[ "${line}" == data:* ]] || continue
+    data="${line#data:}"; data="${data# }"
 
     event_type="$(echo "${data}" | jq -r '.type // ""')"
 
