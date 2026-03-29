@@ -85,7 +85,9 @@ for f in $(ls -1 "${msg_dir}"/*.md 2>/dev/null | sort); do
 
       if [[ -n "${current_text}" ]]; then
         current_text="${current_text%$'\n'}"
-        [[ -n "${current_text}" ]] && \
+        # Only add non-empty text blocks
+        trimmed="${current_text//[$'\n\t ']/}"
+        [[ -n "${trimmed}" ]] && \
           content_blocks="$(echo "${content_blocks}" | jq --arg t "${current_text}" \
             '. + [{type: "text", text: $t}]')"
       fi
