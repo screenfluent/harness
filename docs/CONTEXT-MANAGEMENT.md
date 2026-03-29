@@ -42,46 +42,67 @@ dense, readable record of what happened.
 
 ### Observation format
 
-The format is plain text, not structured data. Optimized for LLM
-comprehension and human debugging.
+Plain text, not structured data. Optimized for LLM comprehension
+and human debugging. Inspired by Mastra's Observational Memory
+(94.87% on LongMemEval).
+
+Key principles:
+- **Knowledge, not metadata** — don't write "read schema.ts, 88 lines".
+  Write what was IN the file: tables, columns, constraints, patterns.
+- **Emoji priority** — 🔴 critical/blocking, 🟡 notable, ✅ completed
+- **Nested `→` for file discoveries** — indented under the action
+- **User intent preserved** — what they asked, in their words
+- **Errors and workarounds captured** — future self needs these
+
+Example (from a real harness testing session):
 
 ```
-Session: 20260329-200349
-Task: building auth module for SvelteKit app
+Date: 2026-03-29
 
-## Turns 1-10
-- User asked to test file editing capabilities
-- Agent created test_plik.txt, edited line 3, verified, deleted
-- Agent read package.json (68 lines), changed version 0.0.1 → 1.3.37, reverted
-- str_replace had escaping bug (perl quoting) — agent used sed fallback
-
-## Turns 11-20
-- User asked to test on real project files
-- Agent read svelte.config.js (30 lines) — SvelteKit config with:
-  adapter-node, experimental async, remoteFunctions, CSP mode: 'auto'
-- Agent did multi-edit: changed mode/async/remoteFunctions, verified, reverted
-- Agent read drizzle.config.ts (22 lines) — Drizzle Kit config with verbose: true
-- Agent read schema.ts (88 lines) — PostgreSQL schema with:
-  sites table (slug, name, targetUrl, siteStatus, publishedAt, screenshotData)
-  authSessions table (tokenHash, expiresAt, revokedAt)
-  slug format check constraint, unique index on slug
-- Agent read rate-limit.ts (47 lines) — fixed-window rate limiter,
-  sweep every 100 checks, Map<string, {count, resetAt}>
+- 🔴 (14:03) User asked to test file editing capabilities on the
+  tailwindgallery.com project
+- 🟡 (14:03) Agent explored project structure:
+    → listed root dir (74 entries): SvelteKit project with Drizzle,
+      src/lib/features/ pattern, Bun package manager
+    → package.json (68 lines): tailwindgallery v0.0.1, type: module,
+      deps: sveltekit, drizzle-orm, valibot, postgres
+- 🟡 (14:05) Agent tested str_replace on package.json:
+    → changed version 0.0.1 → 1.3.37, verified, reverted
+    → str_replace had perl quoting bug with special chars — switched
+      to python with env vars as workaround
+- 🟡 (14:08) Agent read project config files:
+    → svelte.config.js (30 lines): adapter-node, experimental async,
+      remoteFunctions enabled, CSP mode: 'auto'
+    → drizzle.config.ts (22 lines): Drizzle Kit config, verbose: true
+- 🔴 (14:10) Agent read database schema:
+    → schema.ts (88 lines): PostgreSQL schema with Drizzle ORM.
+      sites table: slug (varchar 160, unique, regex-checked),
+      name (varchar 120), targetUrl (varchar 2048), siteStatus
+      enum (draft/published), publishedAt, screenshotData (jsonb).
+      authSessions table: tokenHash, expiresAt, revokedAt.
+      Check constraint: slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'
+- 🟡 (14:12) Agent read rate-limit.ts (47 lines): in-memory
+    fixed-window rate limiter. Map<string, {count, resetAt}>,
+    sweep every 100 checks. Returns boolean from check().
+- ✅ (14:15) Agent tested multi-edit on svelte.config.js:
+    → 3 simultaneous edits (mode, async, remoteFunctions), verified,
+      reverted. Multi-edit atomic validation working.
 ```
 
-### What matters in the format
+### What matters
 
 - **What the user asked** — intent, not verbatim transcript
 - **What the agent did** — tools used, files touched, outcomes
-- **What was discovered** — key facts about the codebase (schemas,
-  patterns, constraints) that might be relevant later
-- **What went wrong** — errors, workarounds, bugs encountered
+- **What was discovered** — schemas, APIs, patterns, config values,
+  constraints. This is the most valuable part. Future turns need
+  this knowledge without re-reading the files.
+- **What went wrong** — errors, bugs, workarounds
 
-### What doesn't matter
+### What doesn't matter (yet)
 
-- Token counting precision (simple turn count is enough)
-- Structured output (text is the universal interface)
-- Exact thresholds (tuning comes later)
+- Token counting precision (simple turn count triggers are enough)
+- Structured output / JSON (text is the universal interface)
+- Exact thresholds (tuning comes after the format is proven)
 
 ### Implementation sketch
 
