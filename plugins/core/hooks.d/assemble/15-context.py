@@ -21,6 +21,7 @@ session_dir   = os.environ.get("SESSION_DIR", "")
 observer_model = os.environ.get("OBSERVER_MODEL", "gemini-3-flash-preview")
 observer_key  = os.environ.get("OBSERVER_KEY", "")
 observer_threshold = int(os.environ.get("OBSERVER_THRESHOLD", "5"))
+observer_batch    = int(os.environ.get("OBSERVER_BATCH", "5"))
 
 payload  = json.loads(sys.stdin.read())
 messages = payload.get("messages", [])
@@ -145,13 +146,62 @@ if os.path.exists(obs_file):
     with open(obs_file) as f:
         existing_obs = f.read()
 
-# Check if there's anything new to observe
-if old_msg_count <= prev_observed and existing_obs:
+# How many new (unobserved) user messages are there?
+new_msg_count = old_msg_count - prev_observed
+
+if new_msg_count <= 0 and existing_obs:
     # Nothing new — use cached observation
     print(f"[context] phase 2: cached ({old_msg_count} user messages, no new)", file=sys.stderr)
     observation = existing_obs
+elif new_msg_count < observer_batch and existing_obs:
+    # Not enough for a batch yet — Phase 1 trims the unobserved delta,
+    # existing observation covers the rest
+    print(f"[context] phase 2: waiting for batch ({new_msg_count}/{observer_batch} new), phase 1 on delta", file=sys.stderr)
+
+    # Find where the unobserved delta starts
+    delta_start = 0
+    if prev_observed > 0:
+        um_seen = 0
+        for i in range(keep_from):
+            if messages[i].get("role") == "user" and isinstance(messages[i].get("content"), str):
+                um_seen += 1
+                if um_seen >= prev_observed:
+                    delta_start = i + 1
+                    break
+
+    # Phase 1 trim on the unobserved portion only
+    trimmed_count = 0
+    for i in range(delta_start, keep_from):
+        msg = messages[i]
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for j, block in enumerate(content):
+            if block.get("type") == "tool_result":
+                original = block.get("content", "")
+                if len(original) > 200:
+                    tid = block.get("tool_use_id", "")
+                    messages[i]["content"][j]["content"] = summarize_tool(tid, original)
+                    trimmed_count += 1
+    if trimmed_count > 0:
+        print(f"[context] phase 1: trimmed {trimmed_count} unobserved tool results", file=sys.stderr)
+
+    # Assemble: observation + trimmed delta + recent
+    obs_message = {
+        "role": "user",
+        "content": f"[Session history — compressed observation of earlier messages]\n\n{existing_obs}"
+    }
+    obs_ack = {
+        "role": "assistant",
+        "content": "Understood. I have the compressed session history. Continuing from where we left off."
+    }
+    payload["messages"] = [obs_message, obs_ack] + messages[delta_start:]
+    print(json.dumps(payload))
+    sys.exit(0)
 else:
-    # Find the delta: messages after the last observed user message
+    # Enough for a batch (or first observation) — observe the delta
     delta_start = 0
     if prev_observed > 0:
         um_seen = 0
