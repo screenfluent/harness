@@ -47,6 +47,18 @@ This diagram is emergent from hooks, not hardcoded. Hooks drive iteration: `tool
 
 Discovery is fully dynamic and hookable — `_refresh_sources` runs every loop iteration, calling the `sources` stage hooks to rebuild the source list. Plugins can be added/removed at runtime.
 
+### Streaming & Parallel Tool Dispatch
+
+Streaming uses fd 3 as a side-channel that bypasses the buffered hook pipeline. The agent command opens fd 3 to the terminal (or `/dev/null` when piped), and providers write text deltas to fd 3 for real-time display while outputting the complete reconstructed response on stdout. The core state machine and hook runner require zero changes — fd 3 passes through all levels of `$()` command substitution since only fd 1 is captured.
+
+Streaming is automatic when stdout is a TTY, off when piped. `HARNESS_STREAM=1` forces streaming in non-TTY contexts. Variant configs can set `stream=always` to force streaming regardless (needed when the API requires `stream=true` for high `max_tokens`).
+
+During streaming, the send hook dispatches tool calls for parallel execution via a fifo. A background dispatcher reads completed tool calls and executes them immediately. Results are written to `${session}/.tool_dispatch/`. The `tool_exec` hook checks for pre-computed results before executing — making pre-dispatched tools instant. Anthropic dispatches per-tool during streaming (at `content_block_stop`), while OpenAI dispatches all tools after the stream ends (no per-tool completion event in the protocol).
+
+### Provider Resolution
+
+Provider resolution is a hookable `resolve` stage, run once before the agent loop. Three hooks form a pipeline: `10-settings` (reads `settings.conf`), `20-detect` (auto-detects first ready provider), `30-defaults` (reads model defaults from variant conf or `--defaults`). Override any step by placing a same-named hook in a higher-priority source dir.
+
 ### Plugin Discovery & Provider Scoping
 
 Source discovery is a hookable `sources` stage. The core bootstraps with bundled plugins + `~/.harness`, then runs `call sources` — a pipeline of hooks that build the full source list. The default hooks:
@@ -62,9 +74,9 @@ Override either by placing a same-named hook in a higher-priority source dir.
 
 **Tools** (`tools/`): Executables responding to `--schema`, `--describe`, `--exec`. Input is JSON on stdin via `--exec`, output on stdout. Language-agnostic. Core tools: `bash`, `read_file`, `write_file`, `str_replace`, `list_dir`. Additional bundled tools: `agent` (spawn subagent sessions), `skill` (load skill instructions).
 
-**Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `start`, `assemble`, `send`, `receive`, `tool_exec`, `tool_done`, `error`, `done`.
+**Hooks** (`hooks.d/<stage>/`): Pipeline executables named `NN-name` (numeric prefix for sort order). Each hook's stdout feeds the next's stdin. Non-zero exit aborts the chain. Stages: `resolve`, `start`, `assemble`, `send`, `receive`, `tool_exec`, `tool_done`, `error`, `done`.
 
-**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`. If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0. Built-in: `anthropic`, `openai`, `chatgpt`, `claude`. The `chatgpt` provider uses OAuth2 PKCE to authenticate with ChatGPT accounts (Plus/Pro/Team/Enterprise) and speaks the Responses API via SSE streaming to `chatgpt.com/backend-api/codex/responses`. The `claude` provider uses OAuth2 PKCE to authenticate with Claude.ai subscriptions (Pro/Team/Enterprise) and calls the standard Messages API with Bearer auth. **Variants** are `.conf` files that reuse a provider's protocol with different endpoint config (url, auth, model). Bundled variants: `groq`, `deepseek` (OpenAI-compatible), `zai` (Anthropic-compatible).
+**Providers** (`providers/`): Receive assembled payload JSON on stdin, output raw API response. Support introspection flags: `--describe`, `--ready`, `--defaults`, `--env`, `--stream` (SSE streaming with real-time display). If `HARNESS_PROVIDER` is not set, harness auto-selects the first provider whose `--ready` exits 0 (via the hookable `resolve` stage). Built-in: `anthropic`, `openai`, `chatgpt`, `claude`. The `chatgpt` provider uses OAuth2 PKCE to authenticate with ChatGPT accounts (Plus/Pro/Team/Enterprise) and speaks the Responses API via SSE streaming to `chatgpt.com/backend-api/codex/responses`. The `claude` provider uses OAuth2 PKCE to authenticate with Claude.ai subscriptions (Pro/Team/Enterprise) and calls the standard Messages API with Bearer auth. **Variants** are `.conf` files that reuse a provider's protocol with different endpoint config (url, auth, model, max_tokens, stream). Bundled variants: `groq`, `deepseek`, `openrouter` (OpenAI-compatible), `fireworks`, `zai` (Anthropic-compatible).
 
 **Prompts** (`AGENTS.md` + `prompts/*.md`): `AGENTS.md` files follow the [agents.md standard](https://agents.md) — placed at the project root (parent of `.harness/`), not inside it. The `30-prompts` assemble hook concatenates them (global first, local last). Additional prompt fragments go in `.harness/prompts/*.md`.
 
@@ -80,14 +92,14 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 
 - `bin/harness` — core: bootstrap, `call` (hook pipeline runner), state follower, CLI dispatch (~100 SLOC)
 - `plugins/core/commands/` — built-in CLI commands (agent, session, tools, hooks, help, version)
-- `plugins/core/hooks.d/` — provider-agnostic hooks (send, tool_exec, tool_done, assemble/tools, assemble/prompts)
+- `plugins/core/hooks.d/` — provider-agnostic hooks (resolve, send, tool_exec, tool_done, assemble/tools, assemble/prompts)
 - `plugins/anthropic/hooks.d/` — Anthropic-specific hooks (assemble/messages, receive/save)
 - `plugins/anthropic/providers/anthropic` — Anthropic API call (API key)
 - `plugins/anthropic/providers/claude` — Claude.ai OAuth (Bearer auth, shares anthropic hooks)
 - `plugins/openai/hooks.d/` — OpenAI-specific hooks (assemble/messages, receive/save)
 - `plugins/openai/providers/openai` — OpenAI-compatible API call (works with ollama, llama.cpp, vLLM)
-- `plugins/openai/providers/*.conf` — OpenAI-compatible variants (groq, deepseek)
-- `plugins/anthropic/providers/*.conf` — Anthropic-compatible variants (zai)
+- `plugins/openai/providers/*.conf` — OpenAI-compatible variants (groq, deepseek, openrouter)
+- `plugins/anthropic/providers/*.conf` — Anthropic-compatible variants (fireworks, zai)
 - `plugins/chatgpt/providers/chatgpt` — ChatGPT Responses API (OAuth, streams SSE)
 - `plugins/chatgpt/hooks.d/` — ChatGPT-specific hooks (assemble/messages, receive/save, auth-set/oauth)
 - `plugins/core/tools/` — five built-in tools
@@ -102,7 +114,7 @@ Sessions live in `<sessions-dir>/<id>/messages/` as numbered markdown files with
 - Hook naming: `NN-name` where NN is a two-digit sort key
 - Command protocol: `--describe` (one-line help), otherwise executed with remaining args
 - Tool protocol: `--schema` (JSON), `--describe` (one-line), `--exec` (JSON stdin → stdout)
-- Provider protocol: `--describe`, `--ready`, `--defaults`, `--env`, plus stdin→stdout for execution
+- Provider protocol: `--describe`, `--ready`, `--defaults`, `--env`, `--stream` (SSE), plus stdin→stdout for execution
 - Hooks receive `HARNESS_SOURCES` (colon-separated active source dirs) for plugin discovery
 - Full protocol docs in `docs/PROTOCOLS.md`
 - `HARNESS_CWD` tracks the session's original working directory; tools use it
