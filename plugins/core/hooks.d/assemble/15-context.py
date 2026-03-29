@@ -24,10 +24,52 @@ observer_key  = os.environ.get("OBSERVER_KEY", "")
 observer_threshold = int(os.environ.get("OBSERVER_THRESHOLD", "5"))
 observer_batch    = int(os.environ.get("OBSERVER_BATCH", "5"))
 
+def fix_alternation(msgs):
+    """Ensure strict user/assistant alternation required by Anthropic API.
+    Merge consecutive same-role messages and insert synthetic fillers."""
+    if not msgs:
+        return msgs
+    fixed = [msgs[0]]
+    for m in msgs[1:]:
+        if m["role"] == fixed[-1]["role"]:
+            if m["role"] == "user":
+                # Merge: concatenate string content or combine arrays
+                prev_c = fixed[-1]["content"]
+                curr_c = m["content"]
+                if isinstance(prev_c, str) and isinstance(curr_c, str):
+                    fixed[-1]["content"] = prev_c + "\n\n" + curr_c
+                elif isinstance(prev_c, list) and isinstance(curr_c, list):
+                    fixed[-1]["content"] = prev_c + curr_c
+                elif isinstance(prev_c, str) and isinstance(curr_c, list):
+                    # String user followed by tool_result array — insert synthetic assistant
+                    fixed.append({"role": "assistant", "content": "I'll continue."})
+                    fixed.append(m)
+                else:
+                    fixed.append({"role": "assistant", "content": "I'll continue."})
+                    fixed.append(m)
+            else:
+                # Two assistants — merge text content
+                prev_c = fixed[-1].get("content", "")
+                curr_c = m.get("content", "")
+                if isinstance(prev_c, str) and isinstance(curr_c, str):
+                    fixed[-1]["content"] = prev_c + "\n\n" + curr_c
+                elif isinstance(prev_c, list) and isinstance(curr_c, list):
+                    fixed[-1]["content"] = prev_c + curr_c
+                elif isinstance(prev_c, str) and isinstance(curr_c, list):
+                    fixed[-1] = {"role": "assistant", "content": [{"type": "text", "text": prev_c}] + curr_c}
+                elif isinstance(prev_c, list) and isinstance(curr_c, str):
+                    fixed[-1]["content"] = prev_c + [{"type": "text", "text": curr_c}]
+                else:
+                    fixed.append(m)
+        else:
+            fixed.append(m)
+    return fixed
+
 payload  = json.loads(sys.stdin.read())
 messages = payload.get("messages", [])
 
 if not messages:
+    payload["messages"] = fix_alternation(messages)
     print(json.dumps(payload))
     sys.exit(0)
 
@@ -44,6 +86,7 @@ for i in range(len(messages) - 1, -1, -1):
             break
 
 if keep_from == 0:
+    payload["messages"] = fix_alternation(messages)
     print(json.dumps(payload))
     sys.exit(0)
 
@@ -124,7 +167,7 @@ if not should_observe:
     if trimmed_count > 0:
         print(f"[context] phase 1: trimmed {trimmed_count} old tool results", file=sys.stderr)
 
-    payload["messages"] = messages
+    payload["messages"] = fix_alternation(messages)
     print(json.dumps(payload))
     sys.exit(0)
 
@@ -198,7 +241,7 @@ elif new_msg_count < observer_batch and existing_obs:
         "role": "assistant",
         "content": "Understood. I have the compressed session history. Continuing from where we left off."
     }
-    payload["messages"] = [obs_message, obs_ack] + messages[delta_start:]
+    payload["messages"] = fix_alternation([obs_message, obs_ack] + messages[delta_start:])
     print(json.dumps(payload))
     sys.exit(0)
 else:
@@ -376,7 +419,7 @@ Rules:
                             trimmed_count += 1
             if trimmed_count > 0:
                 print(f"[context] phase 1 fallback: trimmed {trimmed_count} old tool results", file=sys.stderr)
-            payload["messages"] = messages
+            payload["messages"] = fix_alternation(messages)
             print(json.dumps(payload))
             sys.exit(0)
 
@@ -390,5 +433,11 @@ obs_ack = {
     "content": "Understood. I have the compressed session history. Continuing from where we left off."
 }
 
-payload["messages"] = [obs_message, obs_ack] + messages[keep_from:]
+recent = messages[keep_from:]
+
+# Skip leading assistant if obs_ack already fills that role
+if recent and recent[0].get("role") == "assistant":
+    recent = recent[1:]
+
+payload["messages"] = fix_alternation([obs_message, obs_ack] + recent)
 print(json.dumps(payload))
