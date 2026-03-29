@@ -63,12 +63,25 @@ fi
         printf ' \033[36m%s\033[0m' "${_cmd}"
       fi
       ;;
-    read_file|write_file|str_replace|list_dir)
+    read_file|write_file|list_dir)
       _path="$(echo "${input}" | jq -r '.path // empty')"
       printf ' \033[36m%s\033[0m' "${_path}"
       ;;
+    str_replace)
+      _path="$(echo "${input}" | jq -r '.path // empty')"
+      _old="$(echo "${input}" | jq -r '.old_str // empty')"
+      _new="$(echo "${input}" | jq -r '.new_str // empty')"
+      printf ' \033[36m%s\033[0m\n' "${_path}"
+      # Show diff-style old/new (truncate long strings)
+      if (( ${#_old} > 120 )); then _old="${_old:0:120}…"; fi
+      if (( ${#_new} > 120 )); then _new="${_new:0:120}…"; fi
+      printf '\033[2m  │ \033[31m- %s\033[0m\n' "${_old}"
+      printf '\033[2m  │ \033[32m+ %s\033[0m\n' "${_new}"
+      ;;
   esac
-  printf '\n'
+  if [[ "${tool_name}" != "str_replace" ]]; then
+    printf '\n'
+  fi
 
   # Result (dim, indented, truncated)
   if [[ -n "${result}" ]]; then
