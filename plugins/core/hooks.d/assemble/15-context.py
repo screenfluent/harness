@@ -2,12 +2,15 @@
 15-context.py — Two-tier context compression for harness.
 
 Phase 1: Replace old tool_result content with one-line summaries.
-Phase 2: When enough old turns exist, call observer LLM to compress
-         them into a dense observation log. Cache the result on disk.
+Phase 2: When enough old user messages exist, call observer LLM to
+         compress them into a dense observation log. Cache on disk.
 
 Key design: Phase 2 gets FULL tool results (not Phase 1 summaries)
 so the observer can capture file knowledge. Phase 1 only runs as
 fallback when Phase 2 is disabled or not triggered.
+
+Note: "user messages" = messages typed by the human (string content),
+not tool_result batches. Each user message starts a new interaction cycle.
 
 Reads JSON payload from stdin, writes modified JSON to stdout.
 Logs to stderr.
@@ -15,7 +18,7 @@ Logs to stderr.
 import json, os, sys, subprocess, hashlib, glob
 
 # ── Config ──────────────────────────────────────────────────────────
-keep_turns    = int(os.environ.get("KEEP_TURNS", "10"))
+keep_msgs     = int(os.environ.get("KEEP_MSGS", "10"))
 session_dir   = os.environ.get("SESSION_DIR", "")
 observer_model = os.environ.get("OBSERVER_MODEL", "gemini-3-flash-preview")
 observer_key  = os.environ.get("OBSERVER_KEY", "")
@@ -29,14 +32,15 @@ if not messages:
     sys.exit(0)
 
 # ── Find the keep boundary ──────────────────────────────────────────
-turn_count = 0
+# Count user messages (human-typed, string content) from the end.
+user_msg_count = 0
 keep_from = 0
 
 for i in range(len(messages) - 1, -1, -1):
     msg = messages[i]
     if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-        turn_count += 1
-        if turn_count >= keep_turns:
+        user_msg_count += 1
+        if user_msg_count >= keep_msgs:
             keep_from = i
             break
 
@@ -88,14 +92,14 @@ def summarize_tool(tool_use_id, result_content):
         return f"[{name}: {lines} lines]"
 
 # ── Decide: Phase 2 (observer) or Phase 1 (trim) ───────────────────
-old_turn_count = 0
+old_msg_count = 0
 for i in range(0, keep_from):
     msg = messages[i]
     if msg.get("role") == "user" and isinstance(msg.get("content"), str):
-        old_turn_count += 1
+        old_msg_count += 1
 
 should_observe = (
-    old_turn_count >= observer_threshold
+    old_msg_count >= observer_threshold
     and observer_key
     and session_dir
 )
@@ -125,7 +129,7 @@ if not should_observe:
     print(json.dumps(payload))
     sys.exit(0)
 
-# ── Phase 2: Observer — compress old turns into observation ─────────
+# ── Phase 2: Observer — compress old messages into observation ───────
 obs_dir = os.path.join(session_dir, "observations")
 os.makedirs(obs_dir, exist_ok=True)
 
@@ -137,7 +141,7 @@ obs_file = os.path.join(obs_dir, f"obs-{old_hash}.md")
 if os.path.exists(obs_file):
     with open(obs_file) as f:
         observation = f.read()
-    print(f"[context] phase 2: using cached observation ({old_turn_count} turns)", file=sys.stderr)
+    print(f"[context] phase 2: using cached observation ({old_msg_count} user messages)", file=sys.stderr)
 else:
     # Build transcript from FULL messages (not trimmed!)
     transcript_lines = []
@@ -238,7 +242,7 @@ Rules:
         usage = resp.get("usageMetadata", {})
         in_tok = usage.get("promptTokenCount", "?")
         out_tok = usage.get("candidatesTokenCount", "?")
-        print(f"[context] phase 2: observed {old_turn_count} turns → {len(observation)} chars ({in_tok} in, {out_tok} out tokens)", file=sys.stderr)
+        print(f"[context] phase 2: observed {old_msg_count} user messages → {len(observation)} chars ({in_tok} in, {out_tok} out tokens)", file=sys.stderr)
 
     except Exception as e:
         # Observer failed — fall back to Phase 1 trimming
@@ -267,7 +271,7 @@ Rules:
 # ── Assemble: observation + recent messages ─────────────────────────
 obs_message = {
     "role": "user",
-    "content": f"[Session history — compressed observation of earlier turns]\n\n{observation}"
+    "content": f"[Session history — compressed observation of earlier messages]\n\n{observation}"
 }
 obs_ack = {
     "role": "assistant",
