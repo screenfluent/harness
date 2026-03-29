@@ -6,92 +6,16 @@ case "${1:-}" in --describe) echo "run the agent (interactive or one-shot)"; exi
 
 source "${HARNESS_ROOT}/bin/harness"
 
-# --- Provider resolution ---
-
-_resolve_provider() {
-  # With HARNESS_PROVIDER empty, sources hooks include all provider plugins
-  _refresh_sources
-
-  # Apply settings.conf from sources (most-local wins, env vars override)
-  # Model from settings only applies when settings also set the provider —
-  # an env-var provider override implies the paired model doesn't apply.
-  local i v provider_from_env="${HARNESS_PROVIDER}"
-  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
-    [[ -f "${_HARNESS_SOURCES[i]}/settings.conf" ]] || continue
-    v="$(sed -n 's/^provider=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
-    if [[ -n "${v}" && -z "${HARNESS_PROVIDER}" ]]; then HARNESS_PROVIDER="${v}"; fi
-    if [[ -z "${provider_from_env}" ]]; then
-      v="$(sed -n 's/^model=//p' "${_HARNESS_SOURCES[i]}/settings.conf")"
-      if [[ -n "${v}" && -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${v}"; fi
-    fi
-    break
-  done
-
-  if [[ -z "${HARNESS_PROVIDER}" ]]; then
-    local src f name
-    for src in "${_HARNESS_SOURCES[@]}"; do
-      [[ -d "${src}/providers" ]] || continue
-      for f in "${src}/providers"/*; do
-        if [[ -x "$f" ]]; then
-          name="$(basename "$f")"
-          if "$f" --ready 2>/dev/null; then
-            HARNESS_PROVIDER="${name}"
-            break 2
-          fi
-        elif [[ "$f" == *.conf ]]; then
-          name="$(basename "$f" .conf)"
-          # Variant ready: auth_env set or auth cache entry
-          local ae; ae="$(grep '^auth_env=' "$f" | head -1 | cut -d= -f2-)"
-          if [[ -n "${ae}" && -n "${!ae:-}" ]]; then
-            HARNESS_PROVIDER="${name}"; break 2
-          fi
-          local cache="${HARNESS_HOME}/.auth-cache.json"
-          if [[ -f "${cache}" ]] && jq -e ".\"${name}\" | length > 0" "${cache}" &>/dev/null; then
-            local exp; exp="$(jq -r ".\"${name}\"[0].expires_at // \"0\"" "${cache}")"
-            if [[ "${exp}" == "0" ]] || [[ "$(date +%s)" -lt "${exp}" ]]; then
-              HARNESS_PROVIDER="${name}"; break 2
-            fi
-          fi
-        fi
-      done
-    done
-  fi
-  if [[ -z "${HARNESS_PROVIDER}" ]]; then
-    echo "harness: no ready provider found — set HARNESS_PROVIDER or run: hs auth set <provider>" >&2
-    exit 1
-  fi
-
-  # Get defaults — variant conf or provider binary
-  local conf_file="" i
-  for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
-    [[ -f "${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}.conf" ]] && {
-      conf_file="${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}.conf"
-      break
-    }
-  done
-
-  if [[ -n "${conf_file}" ]]; then
-    local model_val
-    model_val="$(grep '^model=' "${conf_file}" | head -1 | cut -d= -f2-)"
-    if [[ -n "${model_val}" && -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${model_val}"; fi
-  else
-    local provider_path=""
-    for (( i=${#_HARNESS_SOURCES[@]}-1; i>=0; i-- )); do
-      [[ -x "${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}" ]] && {
-        provider_path="${_HARNESS_SOURCES[i]}/providers/${HARNESS_PROVIDER}"
-        break
-      }
-    done
-    [[ -z "${provider_path}" ]] && return 0
-    local key val
-    while IFS='=' read -r key val; do
-      [[ -z "${key}" ]] && continue
-      case "${key}" in
-        model) if [[ -z "${HARNESS_MODEL}" ]]; then HARNESS_MODEL="${val}"; fi ;;
-      esac
-    done < <("${provider_path}" --defaults 2>/dev/null || true)
-  fi
+# --- Provider resolution (hookable resolve stage) ---
+_refresh_sources
+_resolve="$(jq -n --arg p "${HARNESS_PROVIDER}" --arg m "${HARNESS_MODEL}" \
+  '{provider: $p, model: $m}' | call resolve)" || {
+  _err="$(echo "${_resolve}" | jq -r '.error // empty' 2>/dev/null)" || true
+  _die "${_err:-provider resolution failed}"
 }
+HARNESS_PROVIDER="$(echo "${_resolve}" | jq -r '.provider // empty')"
+HARNESS_MODEL="$(echo "${_resolve}" | jq -r '.model // empty')"
+export HARNESS_PROVIDER HARNESS_MODEL
 
 # --- Session helpers (inlined, private) ---
 
@@ -129,9 +53,17 @@ ${content}
 EOF
 }
 
-# --- Main ---
+# --- Streaming setup ---
+# fd 3 → terminal for real-time token display; /dev/null when piped
+if [[ -t 1 ]]; then
+  exec 3>&1
+  export HARNESS_STREAM_FD=3
+else
+  exec 3>/dev/null
+  export HARNESS_STREAM_FD=""
+fi
 
-_resolve_provider
+# --- Main ---
 
 # Determine mode
 session_dir=""

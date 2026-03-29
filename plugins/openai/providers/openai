@@ -19,6 +19,9 @@ OPENAI_MAX_TOKENS   max response tokens (4096)
 ENVEOF
 exit 0; }
 
+streaming=false
+[[ "${1:-}" == "--stream" ]] && { streaming=true; shift; }
+
 OPENAI_API_URL="${OPENAI_API_URL:-https://api.openai.com/v1/chat/completions}"
 OPENAI_MAX_TOKENS="${OPENAI_MAX_TOKENS:-4096}"
 
@@ -70,18 +73,121 @@ if [[ -n "${OPENAI_API_KEY:-}" ]]; then
   auth_args=(-H "Authorization: Bearer ${OPENAI_API_KEY}")
 fi
 
-response="$(curl -sS "${OPENAI_API_URL}" \
-  "${auth_args[@]}" \
-  -H "content-type: application/json" \
-  -d "${request}" \
-  --max-time 300
-)"
+if [[ "${streaming}" == true ]]; then
+  # Add stream options to request
+  request="$(echo "${request}" | jq -c '. + {stream: true, stream_options: {include_usage: true}}')"
 
-# Check for API errors
-error_msg="$(echo "${response}" | jq -r '.error.message // empty' 2>/dev/null)" || true
-if [[ -n "${error_msg}" ]]; then
-  echo "openai API error: ${error_msg}" >&2
-  exit 1
+  # Accumulators
+  resp_id="" resp_model="" text_content="" finish_reason=""
+  prompt_tokens=0 completion_tokens=0 total_tokens=0
+  declare -A tc_ids tc_names tc_args
+
+  while IFS= read -r line; do
+    # Strip trailing carriage return
+    line="${line%$'\r'}"
+
+    # Skip empty lines and non-data lines
+    [[ "${line}" != data:* ]] && continue
+    data="${line#data: }"
+    [[ "${data}" == "[DONE]" ]] && break
+
+    # Parse chunk fields
+    [[ -z "${resp_id}" ]] && resp_id="$(echo "${data}" | jq -r '.id // empty')"
+    [[ -z "${resp_model}" ]] && resp_model="$(echo "${data}" | jq -r '.model // empty')"
+
+    # Content delta
+    delta_content="$(echo "${data}" | jq -r '.choices[0].delta.content // empty')"
+    if [[ -n "${delta_content}" ]]; then
+      text_content+="${delta_content}"
+      [[ -n "${HARNESS_STREAM_FD:-}" ]] && printf '%s' "${delta_content}" >&"${HARNESS_STREAM_FD}"
+    fi
+
+    # Tool call deltas
+    tc_json="$(echo "${data}" | jq -c '.choices[0].delta.tool_calls // empty')"
+    if [[ -n "${tc_json}" && "${tc_json}" != "null" ]]; then
+      tc_count="$(echo "${tc_json}" | jq 'length')"
+      for (( ti=0; ti<tc_count; ti++ )); do
+        tc_idx="$(echo "${tc_json}" | jq -r ".[$ti].index")"
+        tc_id="$(echo "${tc_json}" | jq -r ".[$ti].id // empty")"
+        tc_name="$(echo "${tc_json}" | jq -r ".[$ti].function.name // empty")"
+        tc_arg_chunk="$(echo "${tc_json}" | jq -r ".[$ti].function.arguments // empty")"
+
+        [[ -n "${tc_id}" ]] && tc_ids["${tc_idx}"]="${tc_id}"
+        [[ -n "${tc_name}" ]] && tc_names["${tc_idx}"]="${tc_name}"
+        tc_args["${tc_idx}"]="${tc_args["${tc_idx}"]:-}${tc_arg_chunk}"
+      done
+    fi
+
+    # Finish reason
+    fr="$(echo "${data}" | jq -r '.choices[0].finish_reason // empty')"
+    [[ -n "${fr}" ]] && finish_reason="${fr}"
+
+    # Usage (arrives in the final chunk)
+    usage="$(echo "${data}" | jq -c '.usage // empty')"
+    if [[ -n "${usage}" && "${usage}" != "null" ]]; then
+      prompt_tokens="$(echo "${usage}" | jq -r '.prompt_tokens // 0')"
+      completion_tokens="$(echo "${usage}" | jq -r '.completion_tokens // 0')"
+      total_tokens="$(echo "${usage}" | jq -r '.total_tokens // 0')"
+    fi
+  done < <(curl -sS -N "${OPENAI_API_URL}" \
+    "${auth_args[@]}" \
+    -H "content-type: application/json" \
+    -d "${request}" \
+    --max-time 300
+  )
+
+  # Build tool_calls array
+  tc_array="[]"
+  if [[ ${#tc_ids[@]} -gt 0 ]]; then
+    for idx in $(echo "${!tc_ids[@]}" | tr ' ' '\n' | sort -n); do
+      tc_array="$(echo "${tc_array}" | jq -c \
+        --arg id "${tc_ids[$idx]}" \
+        --arg name "${tc_names[$idx]}" \
+        --arg args "${tc_args[$idx]}" \
+        '. + [{id: $id, type: "function", function: {name: $name, arguments: $args}}]'
+      )"
+    done
+  fi
+
+  # Reconstruct complete response
+  jq -n \
+    --arg id "${resp_id}" \
+    --arg model "${resp_model}" \
+    --arg content "${text_content}" \
+    --argjson tool_calls "${tc_array}" \
+    --arg finish_reason "${finish_reason}" \
+    --argjson prompt_tokens "${prompt_tokens}" \
+    --argjson completion_tokens "${completion_tokens}" \
+    --argjson total_tokens "${total_tokens}" \
+    '{
+      id: $id,
+      object: "chat.completion",
+      model: $model,
+      choices: [{
+        index: 0,
+        message: (
+          {role: "assistant"}
+          | if ($content | length) > 0 then . + {content: $content} else . end
+          | if ($tool_calls | length) > 0 then . + {tool_calls: $tool_calls} else . end
+        ),
+        finish_reason: $finish_reason
+      }],
+      usage: {prompt_tokens: $prompt_tokens, completion_tokens: $completion_tokens, total_tokens: $total_tokens}
+    }'
+else
+  response="$(curl -sS "${OPENAI_API_URL}" \
+    "${auth_args[@]}" \
+    -H "content-type: application/json" \
+    -d "${request}" \
+    --max-time 300
+  )"
+
+  # Check for API errors
+  error_msg="$(echo "${response}" | jq -r '.error.message // empty' 2>/dev/null)" || true
+  if [[ -n "${error_msg}" ]]; then
+    echo "openai API error: ${error_msg}" >&2
+    exit 1
+  fi
+
+  echo "${response}"
 fi
-
-echo "${response}"

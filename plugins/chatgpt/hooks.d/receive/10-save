@@ -94,5 +94,9 @@ EOF
 if [[ "${stop}" == "tool_calls" ]]; then
   echo "${tool_items}" | jq '{next_state: "tool_exec", tool_calls: .}'
 else
-  jq -n --arg output "${text_output}" '{next_state: "done", output: $output}'
+  if [[ -n "${HARNESS_STREAM_FD:-}" ]]; then
+    jq -n '{next_state: "done"}'
+  else
+    jq -n --arg output "${text_output}" '{next_state: "done", output: $output}'
+  fi
 fi

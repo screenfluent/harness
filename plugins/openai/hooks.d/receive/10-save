@@ -84,6 +84,9 @@ MSGEOF
 if [[ "${stop}" == "tool_calls" ]]; then
   jq -n --argjson items "${items}" '{next_state: "tool_exec", tool_calls: $items}'
 else
-  output="${content}"
-  jq -n --arg output "${output}" '{next_state: "done", output: $output}'
+  if [[ -n "${HARNESS_STREAM_FD:-}" ]]; then
+    jq -n '{next_state: "done"}'
+  else
+    jq -n --arg output "${content}" '{next_state: "done", output: $output}'
+  fi
 fi

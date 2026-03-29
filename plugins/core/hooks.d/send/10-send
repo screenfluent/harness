@@ -50,11 +50,15 @@ if [[ -z "${provider_bin}" ]]; then
   exit 1
 fi
 
+# Stream flag: pass --stream when streaming fd is active
+stream_flag=""
+[[ -n "${HARNESS_STREAM_FD:-}" ]] && stream_flag="--stream"
+
 # Call provider, capturing stderr for error reporting
 err_file="$(mktemp)"
 trap 'rm -f "${err_file}"' EXIT
 
-if response="$(echo "${payload}" | "${provider_bin}" 2>"${err_file}")"; then
+if response="$(echo "${payload}" | "${provider_bin}" ${stream_flag} 2>"${err_file}")"; then
   cat "${err_file}" >> "${HARNESS_LOG}"
   if ! echo "${response}" | jq '. + {next_state: "receive"}' 2>/dev/null; then
     echo "provider returned invalid JSON: ${response:0:200}" >&2

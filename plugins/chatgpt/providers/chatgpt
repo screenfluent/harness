@@ -18,6 +18,9 @@ CHATGPT_MODEL       model override (gpt-5.4)
 ENVEOF
 exit 0; }
 
+_stream=false
+[[ "${1:-}" == "--stream" ]] && { _stream=true; shift; }
+
 cache="${HARNESS_HOME:-${HOME}/.harness}/.auth-cache.json"
 [[ -f "${cache}" ]] || { echo "no auth cache — run: hs auth set chatgpt" >&2; exit 1; }
 
@@ -100,7 +103,40 @@ request="$(jq -n \
    | if ($tools | length) > 0 then . + {tools: $tools} else . end'
 )"
 
-# Stream and extract the final response.completed event
+if [[ "${_stream}" == true ]]; then
+  # Streaming path: display text deltas in real-time, extract final response
+  response=""
+  while IFS= read -r line; do
+    [[ "${line}" == data:* ]] || continue
+    data="${line#data: }"
+    type="$(echo "${data}" | jq -r '.type // empty' 2>/dev/null)" || continue
+    case "${type}" in
+      response.output_text.delta)
+        delta="$(echo "${data}" | jq -r '.delta // empty')"
+        [[ -n "${delta}" ]] && printf '%s' "${delta}" >&"${HARNESS_STREAM_FD}"
+        ;;
+      response.completed)
+        response="$(echo "${data}" | jq -c '.response')"
+        ;;
+    esac
+  done < <(curl -sS -N "https://chatgpt.com/backend-api/codex/responses" \
+    -H "Authorization: Bearer ${access_token}" \
+    -H "ChatGPT-Account-ID: ${account_id}" \
+    -H "Content-Type: application/json" \
+    -d "${request}" \
+    --max-time 300
+  )
+
+  if [[ -z "${response}" ]]; then
+    echo "no response.completed event in stream" >&2
+    exit 1
+  fi
+
+  echo "${response}"
+  exit 0
+fi
+
+# Non-streaming path: buffer all SSE output and extract final response
 sse_output="$(curl -sS "https://chatgpt.com/backend-api/codex/responses" \
   -H "Authorization: Bearer ${access_token}" \
   -H "ChatGPT-Account-ID: ${account_id}" \
