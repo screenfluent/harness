@@ -144,7 +144,9 @@ while true; do
     fi
   done
   [[ $? -ne 0 && -z "${input}" ]] && break
-  [[ -z "${input}" ]] && continue
+  # Skip empty or whitespace-only input
+  trimmed="${input//[$'\n\t ']/}"
+  [[ -z "${trimmed}" ]] && continue
   [[ "${input}" == "/quit" || "${input}" == "/exit" ]] && break
   [[ "${input}" == "/session" ]] && { echo "${session_dir}"; continue; }
 
