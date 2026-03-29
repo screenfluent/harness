@@ -35,7 +35,7 @@ _precomputed="${HARNESS_SESSION}/.tool_dispatch/${call_id}.json"
 if [[ -f "${_precomputed}" ]]; then
   result="$(jq -r '.result' "${_precomputed}")"
   [[ "$(jq -r '.error' "${_precomputed}")" == "true" ]] && error=true
-  echo "[harness] tool pre-dispatched: ${tool_name}" >> "${HARNESS_LOG}"
+  # (logged via display block below)
 elif [[ -z "${tool_bin}" ]]; then
   result="error: tool '${tool_name}' not found"
   error=true
@@ -50,42 +50,35 @@ fi
 
 # Display tool execution
 {
-  # Tool header: dim color + name
+  # Tool header
   printf '\033[2m  ┌ \033[0m\033[1;35m%s\033[0m' "${tool_name}"
 
-  # Show key params inline
-  if [[ "${tool_name}" == "bash" ]]; then
-    _cmd="$(echo "${input}" | jq -r '.command // empty')"
-    # Truncate long commands
-    if (( ${#_cmd} > 80 )); then
-      printf ' \033[2m%s…\033[0m' "${_cmd:0:80}"
-    else
-      printf ' \033[2m%s\033[0m' "${_cmd}"
-    fi
-  elif [[ "${tool_name}" == "read_file" ]]; then
-    _path="$(echo "${input}" | jq -r '.path // empty')"
-    printf ' \033[2m%s\033[0m' "${_path}"
-  elif [[ "${tool_name}" == "write_file" ]]; then
-    _path="$(echo "${input}" | jq -r '.path // empty')"
-    printf ' \033[2m%s\033[0m' "${_path}"
-  elif [[ "${tool_name}" == "str_replace" ]]; then
-    _path="$(echo "${input}" | jq -r '.path // empty')"
-    printf ' \033[2m%s\033[0m' "${_path}"
-  elif [[ "${tool_name}" == "list_dir" ]]; then
-    _path="$(echo "${input}" | jq -r '.path // empty')"
-    printf ' \033[2m%s\033[0m' "${_path}"
-  fi
+  # Show key param inline
+  case "${tool_name}" in
+    bash)
+      _cmd="$(echo "${input}" | jq -r '.command // empty')"
+      if (( ${#_cmd} > 80 )); then
+        printf ' \033[36m%s…\033[0m' "${_cmd:0:80}"
+      else
+        printf ' \033[36m%s\033[0m' "${_cmd}"
+      fi
+      ;;
+    read_file|write_file|str_replace|list_dir)
+      _path="$(echo "${input}" | jq -r '.path // empty')"
+      printf ' \033[36m%s\033[0m' "${_path}"
+      ;;
+  esac
   printf '\n'
 
   # Result (dim, indented, truncated)
   if [[ -n "${result}" ]]; then
     total_lines="$(printf '%s' "${result}" | wc -l)"
-    total_lines=$(( total_lines + 0 ))  # trim whitespace
+    total_lines=$(( total_lines + 0 ))
     if (( total_lines > 20 )); then
-      printf '%s\n' "${result}" | head -10 | sed 's/^/\x1b[2m  │ \x1b[0m/'
+      printf '%s\n' "${result}" | head -10 | sed $'s/^/\033[2m  \u2502 \033[0m/'
       printf '\033[2m  │ … %d more lines\033[0m\n' $(( total_lines - 10 ))
     else
-      printf '%s\n' "${result}" | sed 's/^/\x1b[2m  │ \x1b[0m/'
+      printf '%s\n' "${result}" | sed $'s/^/\033[2m  \u2502 \033[0m/'
     fi
   fi
 

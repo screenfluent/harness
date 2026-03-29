@@ -58,22 +58,19 @@ JSON
       exit 1
     fi
 
-    # Perform replacement using perl for reliable multi-line handling
-    perl -i -0pe "
-      \$old = quotemeta(q{${old_str}});
-      s/\$old/\Q${new_str}\E/s;
-    " "${path}" 2>/dev/null || {
-      # Fallback: python if perl isn't available
-      python3 -c "
-import sys
-p = '${path}'
-with open(p) as f: content = f.read()
-content = content.replace('''${old_str}''', '''${new_str}''', 1)
-with open(p, 'w') as f: f.write(content)
+    # Perform replacement using python for safe string handling
+    # Pass old_str and new_str via env to avoid shell quoting issues
+    REPLACE_PATH="${path}" OLD_STR="${old_str}" NEW_STR="${new_str}" python3 -c "
+import os
+path = os.environ['REPLACE_PATH']
+old = os.environ['OLD_STR']
+new = os.environ['NEW_STR']
+with open(path) as f: content = f.read()
+content = content.replace(old, new, 1)
+with open(path, 'w') as f: f.write(content)
 " 2>/dev/null || {
-        echo "error: replacement failed (need perl or python3)"
-        exit 1
-      }
+      echo "error: replacement failed (need python3)"
+      exit 1
     }
 
     echo "replaced in ${path}"
