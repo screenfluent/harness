@@ -148,11 +148,11 @@ _show_info() {
     done
   done
   if (( ${#_tmap[@]} )); then
-    printf '  tools:    %s\n' "$(printf '%s ' "${!_tmap[@]}" | sort | tr '\n' ' ')"
+    printf '  tools:    %s\n' "$(printf '%s\n' "${!_tmap[@]}" | sort | tr '\n' ' ')"
   fi
 
-  # Skills
-  local _skill_found=false
+  # Skills (dedup by name)
+  declare -A _smap
   cur="${PWD}"
   while true; do
     for _sd in "${cur}/.harness/skills" "${cur}/.agents/skills"; do
@@ -160,20 +160,14 @@ _show_info() {
       for _sk in "${_sd}"/*/SKILL.md; do
         [[ -f "${_sk}" ]] || continue
         _sname="$(sed -n 's/^name: *//p' "${_sk}" | head -1)"
-        [[ -n "${_sname}" ]] && { printf '  skill:    %s\n' "${_sname}"; _skill_found=true; }
+        [[ -n "${_sname}" ]] && _smap["${_sname}"]=1
       done
     done
     [[ "${cur}" == "/" ]] && break
     cur="$(dirname "${cur}")"
   done
-  # Global skills
-  for _sd in "${HOME}/.harness/skills" "${HOME}/.agents/skills"; do
-    [[ -d "${_sd}" ]] || continue
-    for _sk in "${_sd}"/*/SKILL.md; do
-      [[ -f "${_sk}" ]] || continue
-      _sname="$(sed -n 's/^name: *//p' "${_sk}" | head -1)"
-      [[ -n "${_sname}" ]] && { printf '  skill:    %s\n' "${_sname}"; _skill_found=true; }
-    done
+  for _sname in $(printf '%s\n' "${!_smap[@]}" | sort); do
+    printf '  skill:    %s\n' "${_sname}"
   done
 
   printf '\033[0m'  # reset
