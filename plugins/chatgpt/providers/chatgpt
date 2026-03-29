@@ -113,7 +113,8 @@ if [[ "${_stream}" == true ]]; then
     type="$(echo "${data}" | jq -r '.type // empty' 2>/dev/null)" || continue
     case "${type}" in
       response.output_text.delta)
-        delta="$(echo "${data}" | jq -r '.delta // empty')"
+        delta="$(echo "${data}" | jq -j '.delta // empty'; printf x)"
+        delta="${delta%x}"
         [[ -n "${delta}" ]] && printf '%s' "${delta}" >&"${HARNESS_STREAM_FD}"
         ;;
       response.output_item.added)

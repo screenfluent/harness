@@ -95,7 +95,9 @@ if [[ "${streaming}" == true ]]; then
       content_block_delta)
         delta_type="$(echo "${data}" | jq -r '.delta.type // ""')"
         if [[ "${delta_type}" == "text_delta" ]]; then
-          text="$(echo "${data}" | jq -r '.delta.text // ""')"
+          # Sentinel trick: $() strips trailing newlines; printf x preserves them
+          text="$(echo "${data}" | jq -j '.delta.text // ""'; printf x)"
+          text="${text%x}"
           text_content+="${text}"
           [[ -n "${HARNESS_STREAM_FD:-}" ]] && printf '%s' "${text}" >&"${HARNESS_STREAM_FD}"
         elif [[ "${delta_type}" == "input_json_delta" ]]; then

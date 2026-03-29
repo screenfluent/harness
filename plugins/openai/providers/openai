@@ -95,8 +95,9 @@ if [[ "${streaming}" == true ]]; then
     [[ -z "${resp_id}" ]] && resp_id="$(echo "${data}" | jq -r '.id // empty')"
     [[ -z "${resp_model}" ]] && resp_model="$(echo "${data}" | jq -r '.model // empty')"
 
-    # Content delta
-    delta_content="$(echo "${data}" | jq -r '.choices[0].delta.content // empty')"
+    # Content delta (sentinel trick preserves trailing newlines from $())
+    delta_content="$(echo "${data}" | jq -j '.choices[0].delta.content // empty'; printf x)"
+    delta_content="${delta_content%x}"
     if [[ -n "${delta_content}" ]]; then
       text_content+="${delta_content}"
       [[ -n "${HARNESS_STREAM_FD:-}" ]] && printf '%s' "${delta_content}" >&"${HARNESS_STREAM_FD}"
