@@ -106,7 +106,7 @@ agent_loop() {
   done
 
   local output; output="$(echo "${result:-}" | jq -r '.output // empty' 2>/dev/null)" || true
-  [[ -n "${output}" ]] && printf '%s\n' "${output}"
+  [[ -n "${output}" ]] && printf '%s\n' "${output}" || true
 }
 
 # --------------------------------------------------------------------------- #

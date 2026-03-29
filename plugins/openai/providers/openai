@@ -80,7 +80,7 @@ if [[ "${streaming}" == true ]]; then
   # Accumulators
   resp_id="" resp_model="" text_content="" finish_reason=""
   prompt_tokens=0 completion_tokens=0 total_tokens=0
-  declare -A tc_ids tc_names tc_args
+  declare -A tc_ids=() tc_names=() tc_args=()
 
   while IFS= read -r line; do
     # Strip trailing carriage return
@@ -135,6 +135,16 @@ if [[ "${streaming}" == true ]]; then
     -d "${request}" \
     --max-time 300
   )
+
+  # Dispatch accumulated tool calls for parallel execution
+  if [[ ${#tc_ids[@]} -gt 0 && -n "${HARNESS_TOOL_FIFO:-}" ]]; then
+    for _didx in $(echo "${!tc_ids[@]}" | tr ' ' '\n' | sort -n); do
+      _parsed="$(echo "${tc_args[$_didx]}" | jq -c '.' 2>/dev/null || echo '{}')"
+      jq -c -n --arg id "${tc_ids[$_didx]}" --arg name "${tc_names[$_didx]}" \
+        --argjson input "${_parsed}" \
+        '{id: $id, name: $name, input: $input}' > "${HARNESS_TOOL_FIFO}"
+    done
+  fi
 
   # Build tool_calls array
   tc_array="[]"

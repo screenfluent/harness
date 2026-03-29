@@ -106,6 +106,7 @@ request="$(jq -n \
 if [[ "${_stream}" == true ]]; then
   # Streaming path: display text deltas in real-time, extract final response
   response=""
+  declare -A _fc_names=() _fc_ids=()
   while IFS= read -r line; do
     [[ "${line}" == data:* ]] || continue
     data="${line#data: }"
@@ -114,6 +115,24 @@ if [[ "${_stream}" == true ]]; then
       response.output_text.delta)
         delta="$(echo "${data}" | jq -r '.delta // empty')"
         [[ -n "${delta}" ]] && printf '%s' "${delta}" >&"${HARNESS_STREAM_FD}"
+        ;;
+      response.output_item.added)
+        _item_type="$(echo "${data}" | jq -r '.item.type // empty')"
+        if [[ "${_item_type}" == "function_call" ]]; then
+          _oi="$(echo "${data}" | jq -r '.output_index')"
+          _fc_names["${_oi}"]="$(echo "${data}" | jq -r '.item.name // empty')"
+          _fc_ids["${_oi}"]="$(echo "${data}" | jq -r '.item.call_id // empty')"
+        fi
+        ;;
+      response.function_call_arguments.done)
+        if [[ -n "${HARNESS_TOOL_FIFO:-}" ]]; then
+          _oi="$(echo "${data}" | jq -r '.output_index')"
+          _args="$(echo "${data}" | jq -r '.arguments // "{}"')"
+          _parsed="$(echo "${_args}" | jq -c '.' 2>/dev/null || echo '{}')"
+          jq -c -n --arg id "${_fc_ids[${_oi}]:-}" --arg name "${_fc_names[${_oi}]:-}" \
+            --argjson input "${_parsed}" \
+            '{id: $id, name: $name, input: $input}' > "${HARNESS_TOOL_FIFO}"
+        fi
         ;;
       response.completed)
         response="$(echo "${data}" | jq -c '.response')"

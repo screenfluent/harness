@@ -55,7 +55,8 @@ EOF
 
 # --- Streaming setup ---
 # fd 3 → terminal for real-time token display; /dev/null when piped
-if [[ -t 1 ]]; then
+# HARNESS_STREAM=1 forces streaming on (for non-TTY contexts)
+if [[ -t 1 || "${HARNESS_STREAM:-}" == "1" ]]; then
   exec 3>&1
   export HARNESS_STREAM_FD=3
 else

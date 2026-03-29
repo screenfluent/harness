@@ -112,6 +112,11 @@ if [[ "${streaming}" == true ]]; then
             --argjson input "${parsed_input}" \
             '. + [{type: "tool_use", id: $id, name: $name, input: $input}]'
           )"
+          if [[ -n "${HARNESS_TOOL_FIFO:-}" ]]; then
+            jq -c -n --arg id "${block_id}" --arg name "${block_name}" \
+              --argjson input "${parsed_input}" \
+              '{id: $id, name: $name, input: $input}' > "${HARNESS_TOOL_FIFO}"
+          fi
           block_type=""
           block_id=""
           block_name=""

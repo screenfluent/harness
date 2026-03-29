@@ -30,7 +30,13 @@ done
 result=""
 error=false
 
-if [[ -z "${tool_bin}" ]]; then
+# Check for pre-dispatched result from streaming parallel execution
+_precomputed="${HARNESS_SESSION}/.tool_dispatch/${call_id}.json"
+if [[ -f "${_precomputed}" ]]; then
+  result="$(jq -r '.result' "${_precomputed}")"
+  [[ "$(jq -r '.error' "${_precomputed}")" == "true" ]] && error=true
+  echo "[harness] tool pre-dispatched: ${tool_name}" >> "${HARNESS_LOG}"
+elif [[ -z "${tool_bin}" ]]; then
   result="error: tool '${tool_name}' not found"
   error=true
 else
