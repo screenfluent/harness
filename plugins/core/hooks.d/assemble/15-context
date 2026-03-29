@@ -14,7 +14,7 @@
 set -euo pipefail
 
 payload="$(cat)"
-keep_msgs="${HARNESS_CONTEXT_KEEP_MSGS:-${HARNESS_CONTEXT_KEEP_TURNS:-10}}"
+keep_msgs="${HARNESS_CONTEXT_KEEP_MSGS:-10}"
 session_dir="${HARNESS_SESSION:-}"
 observer_model="${HARNESS_OBSERVER_MODEL:-gemini-3-flash-preview}"
 observer_key="${HARNESS_OBSERVER_KEY:-}"
