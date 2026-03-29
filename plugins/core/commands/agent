@@ -112,6 +112,73 @@ if [[ "${mode}" == "oneshot" ]]; then
   exit 0
 fi
 
+# Show session info
+_show_info() {
+  local session_dir="$1"
+  printf '\033[2m'  # dim
+
+  # Provider & model
+  printf '  provider: %s  model: %s\n' "${HARNESS_PROVIDER}" "${HARNESS_MODEL}"
+
+  # Context (AGENTS.md files)
+  local cur="${PWD}"
+  while true; do
+    [[ -f "${cur}/AGENTS.md" ]] && printf '  context:  %s\n' "${cur}/AGENTS.md"
+    [[ "${cur}" == "/" ]] && break
+    cur="$(dirname "${cur}")"
+  done
+  [[ -f "${HOME}/AGENTS.md" ]] && printf '  context:  ~/AGENTS.md\n'
+
+  # Prompts
+  IFS=':' read -ra _srcs <<< "${HARNESS_SOURCES:-}"
+  for _s in "${_srcs[@]}"; do
+    [[ -d "${_s}/prompts" ]] || continue
+    for _p in "${_s}/prompts/"*.md 2>/dev/null; do
+      [[ -f "${_p}" ]] && printf '  prompt:   %s\n' "${_p}"
+    done
+  done
+
+  # Tools
+  declare -A _tmap
+  for _s in "${_srcs[@]}"; do
+    [[ -d "${_s}/tools" ]] || continue
+    for _t in "${_s}/tools/"*; do
+      [[ -x "${_t}" ]] && _tmap["$(basename "${_t}")"]="${_t}"
+    done
+  done
+  if (( ${#_tmap[@]} )); then
+    printf '  tools:    %s\n' "$(printf '%s ' "${!_tmap[@]}" | sort | tr '\n' ' ')"
+  fi
+
+  # Skills
+  local _skill_found=false
+  cur="${PWD}"
+  while true; do
+    for _sd in "${cur}/.harness/skills" "${cur}/.agents/skills"; do
+      [[ -d "${_sd}" ]] || continue
+      for _sk in "${_sd}"/*/SKILL.md; do
+        [[ -f "${_sk}" ]] || continue
+        _sname="$(sed -n 's/^name: *//p' "${_sk}" | head -1)"
+        [[ -n "${_sname}" ]] && { printf '  skill:    %s\n' "${_sname}"; _skill_found=true; }
+      done
+    done
+    [[ "${cur}" == "/" ]] && break
+    cur="$(dirname "${cur}")"
+  done
+  # Global skills
+  for _sd in "${HOME}/.harness/skills" "${HOME}/.agents/skills"; do
+    [[ -d "${_sd}" ]] || continue
+    for _sk in "${_sd}"/*/SKILL.md; do
+      [[ -f "${_sk}" ]] || continue
+      _sname="$(sed -n 's/^name: *//p' "${_sk}" | head -1)"
+      [[ -n "${_sname}" ]] && { printf '  skill:    %s\n' "${_sname}"; _skill_found=true; }
+    done
+  done
+
+  printf '\033[0m'  # reset
+}
+_show_info "${session_dir}"
+
 # Show history on resume
 if [[ -d "${session_dir}/messages" ]]; then
   for f in $(ls -1 "${session_dir}/messages/"*.md 2>/dev/null | sort); do
