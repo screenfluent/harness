@@ -2,12 +2,10 @@
 15-context.py — Two-tier context compression for harness.
 
 Phase 1: Replace old tool_result content with one-line summaries.
-Phase 2: When enough old user messages exist, call observer LLM to
-         compress them into a dense observation log. Cache on disk.
-
-Key design: Phase 2 gets FULL tool results (not Phase 1 summaries)
-so the observer can capture file knowledge. Phase 1 only runs as
-fallback when Phase 2 is disabled or not triggered.
+Phase 2: Incremental observer — when new messages fall out of the keep
+         window, only the delta is sent to the observer LLM. Previous
+         observation is passed as context so the observer can append
+         coherently. Result cached on disk.
 
 Note: "user messages" = messages typed by the human (string content),
 not tool_result batches. Each user message starts a new interaction cycle.
@@ -15,7 +13,7 @@ not tool_result batches. Each user message starts a new interaction cycle.
 Reads JSON payload from stdin, writes modified JSON to stdout.
 Logs to stderr.
 """
-import json, os, sys, subprocess, hashlib, glob
+import json, os, sys, subprocess, hashlib
 
 # ── Config ──────────────────────────────────────────────────────────
 keep_msgs     = int(os.environ.get("KEEP_MSGS", "10"))
@@ -32,7 +30,6 @@ if not messages:
     sys.exit(0)
 
 # ── Find the keep boundary ──────────────────────────────────────────
-# Count user messages (human-typed, string content) from the end.
 user_msg_count = 0
 keep_from = 0
 
@@ -91,7 +88,7 @@ def summarize_tool(tool_use_id, result_content):
     else:
         return f"[{name}: {lines} lines]"
 
-# ── Decide: Phase 2 (observer) or Phase 1 (trim) ───────────────────
+# ── Count old user messages ─────────────────────────────────────────
 old_msg_count = 0
 for i in range(0, keep_from):
     msg = messages[i]
@@ -129,56 +126,116 @@ if not should_observe:
     print(json.dumps(payload))
     sys.exit(0)
 
-# ── Phase 2: Observer — compress old messages into observation ───────
+# ── Phase 2: Incremental observer ──────────────────────────────────
 obs_dir = os.path.join(session_dir, "observations")
 os.makedirs(obs_dir, exist_ok=True)
+state_file = os.path.join(obs_dir, "state.json")
+obs_file = os.path.join(obs_dir, "observation.md")
 
-# Hash the ORIGINAL old messages (full content) to detect changes
-old_msgs_json = json.dumps(messages[:keep_from], sort_keys=True)
-old_hash = hashlib.sha256(old_msgs_json.encode()).hexdigest()[:16]
-obs_file = os.path.join(obs_dir, f"obs-{old_hash}.md")
+# Load state
+prev_observed = 0
+if os.path.exists(state_file):
+    with open(state_file) as f:
+        state = json.load(f)
+    prev_observed = state.get("observed_user_msgs", 0)
 
+# Load existing observation
+existing_obs = ""
 if os.path.exists(obs_file):
     with open(obs_file) as f:
-        observation = f.read()
-    print(f"[context] phase 2: using cached observation ({old_msg_count} user messages)", file=sys.stderr)
+        existing_obs = f.read()
+
+# Check if there's anything new to observe
+if old_msg_count <= prev_observed and existing_obs:
+    # Nothing new — use cached observation
+    print(f"[context] phase 2: cached ({old_msg_count} user messages, no new)", file=sys.stderr)
+    observation = existing_obs
 else:
-    # Build transcript from FULL messages (not trimmed!)
-    transcript_lines = []
-    for i in range(0, keep_from):
-        msg = messages[i]
-        role = msg.get("role", "?").upper()
-        content = msg.get("content", "")
+    # Find the delta: messages after the last observed user message
+    delta_start = 0
+    if prev_observed > 0:
+        um_seen = 0
+        for i in range(keep_from):
+            if messages[i].get("role") == "user" and isinstance(messages[i].get("content"), str):
+                um_seen += 1
+                if um_seen >= prev_observed:
+                    delta_start = i + 1
+                    break
+        # Include all messages (assistant, tool_result) after that user message
+        # up to keep_from
+    
+    delta_msgs = messages[delta_start:keep_from]
+    new_user_msgs = sum(
+        1 for m in delta_msgs
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    )
 
-        if isinstance(content, str):
-            if not content.strip():
-                continue
-            transcript_lines.append(f"[{role}]: {content}")
-        elif isinstance(content, list):
-            for block in content:
-                btype = block.get("type", "")
-                if btype == "text" and block.get("text", "").strip():
-                    transcript_lines.append(f"[{role}]: {block['text']}")
-                elif btype == "tool_use":
-                    name = block.get("name", "?")
-                    inp = block.get("input", {})
-                    inp_str = json.dumps(inp)
-                    if len(inp_str) > 300:
-                        inp_str = inp_str[:300] + "..."
-                    transcript_lines.append(f"[{role} tool_call]: {name}({inp_str})")
-                elif btype == "tool_result":
-                    tid = block.get("tool_use_id", "")
-                    tc = block.get("content", "")
-                    # Truncate very large results for the observer transcript
-                    # but keep enough for knowledge extraction
-                    if len(tc) > 2000:
-                        tc = tc[:2000] + f"\n... [{len(tc)} chars total, truncated for observer]"
-                    info = tool_use_map.get(tid, {"name": "?", "input": {}})
-                    transcript_lines.append(f"[TOOL_RESULT ({info['name']})]: {tc}")
+    if not delta_msgs:
+        observation = existing_obs
+        print(f"[context] phase 2: cached (no delta messages)", file=sys.stderr)
+    else:
+        # Build transcript of ONLY the delta
+        transcript_lines = []
+        for msg in delta_msgs:
+            role = msg.get("role", "?").upper()
+            content = msg.get("content", "")
 
-    transcript = "\n".join(transcript_lines)
+            if isinstance(content, str):
+                if not content.strip():
+                    continue
+                transcript_lines.append(f"[{role}]: {content}")
+            elif isinstance(content, list):
+                for block in content:
+                    btype = block.get("type", "")
+                    if btype == "text" and block.get("text", "").strip():
+                        transcript_lines.append(f"[{role}]: {block['text']}")
+                    elif btype == "tool_use":
+                        name = block.get("name", "?")
+                        inp = block.get("input", {})
+                        inp_str = json.dumps(inp)
+                        if len(inp_str) > 300:
+                            inp_str = inp_str[:300] + "..."
+                        transcript_lines.append(f"[{role} tool_call]: {name}({inp_str})")
+                    elif btype == "tool_result":
+                        tid = block.get("tool_use_id", "")
+                        tc = block.get("content", "")
+                        if len(tc) > 2000:
+                            tc = tc[:2000] + f"\n... [{len(tc)} chars total, truncated for observer]"
+                        info = tool_use_map.get(tid, {"name": "?", "input": {}})
+                        transcript_lines.append(f"[TOOL_RESULT ({info['name']})]: {tc}")
 
-    prompt = f"""Compress the transcript below into an observation log. Output the log directly — no thinking, no preamble, no explanation.
+        transcript = "\n".join(transcript_lines)
+
+        # Build prompt — if we have existing observation, ask to append
+        if existing_obs:
+            prompt = f"""You are an incremental session observer. Below is the existing observation log, followed by NEW transcript that hasn't been observed yet. Append new observations to the existing log. Output the COMPLETE updated log — existing + new entries.
+
+Output the log directly — no thinking, no preamble, no explanation.
+
+Format for new entries:
+
+- 🔴 User: [what human asked/decided — translate Polish to English]
+- 🟡 Agent: [what agent did in response]
+    → file.ts (N lines): what was IN the file — schemas, values, patterns
+- ✅ Outcome: [verified result]
+
+Rules:
+- Keep ALL existing observations unchanged
+- APPEND new observations at the end
+- Prefix with "User:", "Agent:", or "Outcome:"
+- Capture KNOWLEDGE in files, not just "read file X"
+- Capture errors and resolutions
+- Use → for file discoveries
+- Group read-edit-verify into single entries
+- Skip greetings/chitchat, English
+
+=== EXISTING OBSERVATION ===
+{existing_obs}
+
+=== NEW TRANSCRIPT TO OBSERVE ===
+{transcript}"""
+        else:
+            prompt = f"""Compress the transcript below into an observation log. Output the log directly — no thinking, no preamble, no explanation.
 
 Format:
 
@@ -202,71 +259,75 @@ Rules:
 ---
 {transcript}"""
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{observer_model}:generateContent?key={observer_key}"
-    api_body = json.dumps({
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "maxOutputTokens": 4096,
-            "thinkingConfig": {"thinkingBudget": 0}
-        }
-    })
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{observer_model}:generateContent?key={observer_key}"
+        api_body = json.dumps({
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": 4096,
+                "thinkingConfig": {"thinkingBudget": 0}
+            }
+        })
 
-    try:
-        result = subprocess.run(
-            ["curl", "-s", api_url,
-             "-H", "Content-Type: application/json",
-             "-d", api_body],
-            capture_output=True, text=True, timeout=60
-        )
-        resp = json.loads(result.stdout)
-        parts = resp.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        observation = ""
-        for p in parts:
-            if "text" in p and not p.get("thought"):
-                observation += p["text"]
+        try:
+            result = subprocess.run(
+                ["curl", "-s", api_url,
+                 "-H", "Content-Type: application/json",
+                 "-d", api_body],
+                capture_output=True, text=True, timeout=60
+            )
+            resp = json.loads(result.stdout)
+            parts = resp.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            observation = ""
+            for p in parts:
+                if "text" in p and not p.get("thought"):
+                    observation += p["text"]
 
-        if not observation.strip():
-            raise ValueError("Empty observation from API")
+            if not observation.strip():
+                raise ValueError("Empty observation from API")
 
-        # Strip markdown code fences if present
-        obs = observation.strip()
-        if obs.startswith("```"):
-            obs = "\n".join(obs.split("\n")[1:])
-        if obs.endswith("```"):
-            obs = "\n".join(obs.split("\n")[:-1])
-        observation = obs.strip()
+            # Strip markdown code fences if present
+            obs = observation.strip()
+            if obs.startswith("```"):
+                obs = "\n".join(obs.split("\n")[1:])
+            if obs.endswith("```"):
+                obs = "\n".join(obs.split("\n")[:-1])
+            observation = obs.strip()
 
-        with open(obs_file, "w") as f:
-            f.write(observation)
+            # Save observation and state
+            with open(obs_file, "w") as f:
+                f.write(observation)
+            with open(state_file, "w") as f:
+                json.dump({"observed_user_msgs": old_msg_count}, f)
 
-        usage = resp.get("usageMetadata", {})
-        in_tok = usage.get("promptTokenCount", "?")
-        out_tok = usage.get("candidatesTokenCount", "?")
-        print(f"[context] phase 2: observed {old_msg_count} user messages → {len(observation)} chars ({in_tok} in, {out_tok} out tokens)", file=sys.stderr)
+            usage = resp.get("usageMetadata", {})
+            in_tok = usage.get("promptTokenCount", "?")
+            out_tok = usage.get("candidatesTokenCount", "?")
+            label = f"+{new_user_msgs} new" if existing_obs else f"{old_msg_count} total"
+            print(f"[context] phase 2: observed {label} user messages → {len(observation)} chars ({in_tok} in, {out_tok} out tokens)", file=sys.stderr)
 
-    except Exception as e:
-        # Observer failed — fall back to Phase 1 trimming
-        print(f"[context] phase 2 failed ({e}), falling back to phase 1", file=sys.stderr)
-        trimmed_count = 0
-        for i in range(0, keep_from):
-            msg = messages[i]
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for j, block in enumerate(content):
-                if block.get("type") == "tool_result":
-                    original = block.get("content", "")
-                    if len(original) > 200:
-                        tid = block.get("tool_use_id", "")
-                        messages[i]["content"][j]["content"] = summarize_tool(tid, original)
-                        trimmed_count += 1
-        if trimmed_count > 0:
-            print(f"[context] phase 1 fallback: trimmed {trimmed_count} old tool results", file=sys.stderr)
-        payload["messages"] = messages
-        print(json.dumps(payload))
-        sys.exit(0)
+        except Exception as e:
+            # Observer failed — fall back to Phase 1 trimming
+            print(f"[context] phase 2 failed ({e}), falling back to phase 1", file=sys.stderr)
+            trimmed_count = 0
+            for i in range(0, keep_from):
+                msg = messages[i]
+                if msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for j, block in enumerate(content):
+                    if block.get("type") == "tool_result":
+                        original = block.get("content", "")
+                        if len(original) > 200:
+                            tid = block.get("tool_use_id", "")
+                            messages[i]["content"][j]["content"] = summarize_tool(tid, original)
+                            trimmed_count += 1
+            if trimmed_count > 0:
+                print(f"[context] phase 1 fallback: trimmed {trimmed_count} old tool results", file=sys.stderr)
+            payload["messages"] = messages
+            print(json.dumps(payload))
+            sys.exit(0)
 
 # ── Assemble: observation + recent messages ─────────────────────────
 obs_message = {
