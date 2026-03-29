@@ -14,6 +14,7 @@ Reads JSON payload from stdin, writes modified JSON to stdout.
 Logs to stderr.
 """
 import json, os, sys, subprocess, hashlib
+from datetime import datetime
 
 # ── Config ──────────────────────────────────────────────────────────
 keep_msgs     = int(os.environ.get("KEEP_MSGS", "10"))
@@ -289,7 +290,7 @@ Rules:
 
 Format:
 
-Date: today
+Date: {datetime.now().strftime('%Y-%m-%d')}
 
 - 🔴 User: [what human asked/decided — translate Polish to English]
 - 🟡 Agent: [what agent did in response]
