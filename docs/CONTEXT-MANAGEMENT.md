@@ -1,158 +1,128 @@
 # Context Management
 
-Phased approach to managing the context window in harness sessions.
-Inspired by Mastra's Observational Memory (94.87% on LongMemEval).
+Manages the context window in harness sessions. Two-tier compression
+inspired by Mastra's Observational Memory.
 
 ## Problem
 
 As sessions grow, tool results accumulate and dominate context size.
-A `read_file` from 30 turns ago still sits in the payload at full size
-even though the file has since been modified. Every turn re-sends
-the entire history verbatim.
+A `read_file` from 30 messages ago still sits in the payload at full
+size even though the file has since been modified.
 
 ## Architecture
 
-Harness assembles context from files on every turn. The `10-messages`
-hook is a program that builds the messages array — it doesn't have to
-load messages verbatim, in order, or in total. Context management
-hooks transform the payload between `10-messages` and `20-tools`.
+Hook `15-context` in `assemble/` transforms the payload between
+`10-messages` and `20-tools`. Files on disk are never modified —
+compression is payload-only.
 
-Files on disk are never modified. Compression is payload-only.
+```
+Your message →
+  ├─ Last 10 user messages + their tool calls/results → VERBATIM
+  ├─ Old observed messages → observation.md (LLM compression)
+  ├─ Old unobserved delta (< batch) → Phase 1 (tool results trimmed)
+  └─ Delta ≥ batch → observer appends to observation.md
+```
+
+## Config
+
+| Env var | Default | What it does |
+|---------|---------|-------------|
+| `HARNESS_CONTEXT_KEEP_MSGS` | 10 | Recent user messages to keep verbatim |
+| `HARNESS_OBSERVER_KEY` | — | Gemini API key (required for Phase 2) |
+| `HARNESS_OBSERVER_MODEL` | gemini-3-flash-preview | Observer model |
+| `HARNESS_OBSERVER_THRESHOLD` | 5 | Old user messages needed for first observation |
+| `HARNESS_OBSERVER_BATCH` | 5 | New user messages to batch before observing |
+
+"User messages" = messages typed by the human (string content), not
+tool_result batches. Each starts a new interaction cycle.
 
 ## Phase 1: Trim old tool results ✅
 
-Hook `15-context` in `assemble/`. Runs between `10-messages` and
-`20-tools`.
+When Phase 2 is disabled or delta < batch, old tool results (>200
+chars) are replaced with one-line summaries:
 
-- Last 10 turns → verbatim with full tool results
-- Older tool results (>200 chars) → one-line summaries:
-  - `[read: src/db/schema.ts, 88 lines]`
-  - `[ran: npm test, 45 lines output]`
-  - `[edited: config.ts, 3 edits]`
-  - `[wrote: src/foo.ts, 120 bytes]`
-  - `[listed: src/lib, 74 lines]`
+- `[read: src/db/schema.ts, 88 lines]`
+- `[ran: npm test, 45 lines output]`
+- `[edited: config.ts, 3 edits]`
 
-Zero LLM calls. ~100 LOC python inside bash hook.
+Zero LLM calls. Runs as fallback or on unobserved delta between
+observer batches.
 
-## Phase 2: Observation — compress old turns into a log
+## Phase 2: Observer ✅
 
-When enough turns accumulate beyond the Phase 1 window, an LLM
-side-call compresses them into an observation log. The goal is a
-dense, readable record of what happened.
+When enough old user messages accumulate, an LLM side-call (Gemini 3
+Flash) compresses them into a dense observation log.
+
+### How it works
+
+1. **First observation**: when ≥ threshold (5) old user messages exist,
+   observer compresses all of them
+2. **Incremental**: tracks observed count in `state.json`. Only new
+   (unobserved) messages are sent to the observer as delta
+3. **Batching**: waits until ≥ batch (5) new user messages accumulate.
+   Between batches, Phase 1 trims the delta's tool results
+4. **Append**: existing observation is passed as context so the observer
+   appends coherently. Output is the complete updated observation
+5. **Cache**: if nothing new → zero API call, instant cache hit
+
+### Storage
+
+```
+sessions/<id>/observations/
+  observation.md    # cumulative observation log
+  state.json        # {"observed_user_msgs": N}
+```
 
 ### Observation format
 
-Plain text, not structured data. Optimized for LLM comprehension
-and human debugging. Inspired by Mastra's Observational Memory
-(94.87% on LongMemEval).
-
-Key principles:
-- **Knowledge, not metadata** — don't write "read schema.ts, 88 lines".
-  Write what was IN the file: tables, columns, constraints, patterns.
-- **Emoji priority** — 🔴 critical/blocking, 🟡 notable, ✅ completed
-- **Nested `→` for file discoveries** — indented under the action
-- **User intent preserved** — what they asked, in their words
-- **Errors and workarounds captured** — future self needs these
-
-Example (from a real harness testing session):
+Plain text with role prefixes and emoji priorities:
 
 ```
 Date: 2026-03-29
 
-- 🔴 (14:03) User asked to test file editing capabilities on the
-  tailwindgallery.com project
-- 🟡 (14:03) Agent explored project structure:
-    → listed root dir (74 entries): SvelteKit project with Drizzle,
-      src/lib/features/ pattern, Bun package manager
-    → package.json (68 lines): tailwindgallery v0.0.1, type: module,
-      deps: sveltekit, drizzle-orm, valibot, postgres
-- 🟡 (14:05) Agent tested str_replace on package.json:
-    → changed version 0.0.1 → 1.3.37, verified, reverted
-    → str_replace had perl quoting bug with special chars — switched
-      to python with env vars as workaround
-- 🟡 (14:08) Agent read project config files:
-    → svelte.config.js (30 lines): adapter-node, experimental async,
-      remoteFunctions enabled, CSP mode: 'auto'
-    → drizzle.config.ts (22 lines): Drizzle Kit config, verbose: true
-- 🔴 (14:10) Agent read database schema:
-    → schema.ts (88 lines): PostgreSQL schema with Drizzle ORM.
-      sites table: slug (varchar 160, unique, regex-checked),
-      name (varchar 120), targetUrl (varchar 2048), siteStatus
-      enum (draft/published), publishedAt, screenshotData (jsonb).
+- 🔴 User: Test file editing on the tailwindgallery.com project
+- 🟡 Agent: Explored project structure, read config files:
+    → package.json (68 lines): tailwindgallery v0.0.1, type: module
+    → svelte.config.js (30 lines): adapter-node, async: true,
+      remoteFunctions: true, CSP mode: 'auto'
+- 🟡 Agent: Read database schema:
+    → schema.ts (88 lines): PostgreSQL/Drizzle. sites table with
+      slug varchar(160), regex check, siteStatus enum, analyzerData jsonb.
       authSessions table: tokenHash, expiresAt, revokedAt.
-      Check constraint: slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'
-- 🟡 (14:12) Agent read rate-limit.ts (47 lines): in-memory
-    fixed-window rate limiter. Map<string, {count, resetAt}>,
-    sweep every 100 checks. Returns boolean from check().
-- ✅ (14:15) Agent tested multi-edit on svelte.config.js:
-    → 3 simultaneous edits (mode, async, remoteFunctions), verified,
-      reverted. Multi-edit atomic validation working.
+- 🔴 Agent: str_replace failed due to escaping — workaround via sed
+- ✅ Outcome: Multi-edit atomic validation working, git diff clean
 ```
 
-### What matters
+Key principles:
+- **Knowledge, not metadata** — what was IN the file, not "read file X"
+- **User intent** — what they asked, translated to English
+- **Errors and workarounds** — future self needs these
+- **Grouped** — read-edit-verify cycles as single entries
 
-- **What the user asked** — intent, not verbatim transcript
-- **What the agent did** — tools used, files touched, outcomes
-- **What was discovered** — schemas, APIs, patterns, config values,
-  constraints. This is the most valuable part. Future turns need
-  this knowledge without re-reading the files.
-- **What went wrong** — errors, bugs, workarounds
+### Model comparison (tested on real 147-message session)
 
-### What doesn't matter (yet)
+| Model | Lines | Chars | Compression | Quality |
+|-------|-------|-------|-------------|---------|
+| Gemini 2.5 Flash | 139 | 9.3k | 4x | verbose, repeats steps |
+| **Gemini 3 Flash** | **43** | **3.2k** | **12x** | **best balance** |
+| Gemini 3.1 Flash Lite | 30 | 2.0k | 19x | too aggressive, loses detail |
 
-- Token counting precision (simple turn count triggers are enough)
-- Structured output / JSON (text is the universal interface)
-- Exact thresholds (tuning comes after the format is proven)
+## Phase 3: Reflection (planned)
 
-### Implementation sketch
-
-A new hook or extension to `15-context`:
-1. Count turns beyond the keep window
-2. When enough accumulate (e.g. 10+ old turns), make one LLM
-   side-call to compress them into the observation format above
-3. Store the observation as a file: `sessions/<id>/observations/L1-001.md`
-4. On next assemble, inject observation text as the first message
-   instead of the raw old messages
-
-The observation file is append-only — new compressions add new
-sections. Raw messages on disk stay untouched.
-
-## Phase 3: Reflection — compress observations
-
-When observations grow large, a second LLM call compresses them
-into higher-level reflections. This is hierarchical:
+When observation.md grows large, a reflector LLM compresses it into
+a higher-level summary. Hierarchical:
 
 ```
-Recent messages (verbatim, last 10 turns)
+Recent messages (verbatim)
   ↑ Phase 1: tool results trimmed
-Observations (compressed turns, ~500 words per 10 turns)  
-  ↑ Phase 2: LLM side-call
-Reflections (compressed observations, ~200 words per batch)
-  ↑ Phase 3: LLM side-call
-```
-
-Multiple observation batches merge into one reflection.
-Multiple reflections could merge further if sessions get very long.
-
-Same file-based approach:
-```
-sessions/<id>/
-  messages/              # raw messages (source of truth)
-  observations/
-    L1-001.md            # turns 1-10 compressed
-    L1-002.md            # turns 11-20 compressed
-  reflections/
-    L2-001.md            # L1-001 + L1-002 compressed together
+Observations (~40 lines per batch)
+  ↑ Phase 2: observer LLM
+Reflections (~10 lines per observation batch)
+  ↑ Phase 3: reflector LLM
 ```
 
 ## Phase 4: Retrieval (future)
 
-Agent gets a `recall` tool to page through raw messages behind
-any observation. When the compressed summary isn't enough, agent
-reads the originals. Similar to Mastra's retrieval mode.
-
-## Priority
-
-Phase 1 is done and works. Phase 2 is the next step — getting the
-observation format right matters more than optimizing when it fires.
-Phases 3-4 are for when sessions routinely exceed hundreds of turns.
+Agent gets a `recall` tool to page through raw messages behind any
+observation. When the compressed summary isn't enough, agent reads
+the originals.
