@@ -176,3 +176,23 @@ Assembly prefers reflection for older batches, raw observation for recent.
 Agent gets a `recall` tool to page through raw messages behind any
 observation. Batch metadata (`user_range` in `index.json`) maps
 directly to source messages.
+
+## Notes: OpenAI Compaction endpoint
+
+OpenAI has a standalone `/responses/compact` endpoint that does
+server-side conversation compaction. Returns an `encrypted_content`
+blob that can be passed back as input — the model knows how to
+read it but the client can't inspect it.
+
+https://developers.openai.com/api/reference/resources/responses/methods/compact
+
+Differences from our approach:
+- Server-side, encrypted, not debuggable
+- Zero prompting needed — just send history, get blob back
+- Only works with OpenAI models
+- `previous_response_id` lets OpenAI manage history server-side
+
+Could be useful as an alternative compaction backend for the OpenAI
+provider — a new Mode in `build_plan()` that calls `/responses/compact`
+instead of our Gemini observer. Worth experimenting with if harness
+gets heavy OpenAI usage.
