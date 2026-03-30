@@ -126,7 +126,7 @@ expires_in="$(echo "${token_response}" | jq -r '.expires_in')"
 # --- compute expiry ---
 expires_at=""
 if [[ "${expires_in}" != "null" && -n "${expires_in}" ]]; then
-  expires_at="$(( $(date +%s) + expires_in ))"
+  expires_at="$(( $(date +%s) + expires_in - 300 ))"
 fi
 
 echo "logged in successfully" >&2

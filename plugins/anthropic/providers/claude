@@ -51,7 +51,7 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "${expires
 
   new_refresh="$(echo "${token_response}" | jq -r '.refresh_token // empty')"
   expires_in="$(echo "${token_response}" | jq -r '.expires_in // "0"')"
-  new_expires_at="$(( $(date +%s) + expires_in ))"
+  new_expires_at="$(( $(date +%s) + expires_in - 300 ))"
 
   access_token="${new_access}"
   [[ -n "${new_refresh}" && "${new_refresh}" != "null" ]] && refresh_token="${new_refresh}"
