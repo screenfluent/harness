@@ -4,24 +4,24 @@ Format:
 
 Date: {{date}}
 
-- 🔴 User: [what human asked or decided — translate Polish to English]
-- 🟡 Agent: [what agent did]
+- 🔴 Important fact, decision, constraint, deadline, or error
+- 🟡 Contextual detail — configuration, question, clarification
+- 🟢 Routine action, confirmation, or background info
     → file.ts (N bytes/lines): what was IN the file — schemas, values, patterns
-- 🟡 User confirmed / provided context / clarified
-- ✅ Outcome: [verified result, merged PR, test passing, etc.]
+
+Emoji = priority level (like log levels), NOT who said it:
+  🔴 = important — will matter in future turns
+  🟡 = context — may matter later
+  🟢 = info — routine, but worth noting
 
 Rules:
-- Emojis follow what ACTUALLY happened — not a rigid pattern
-  - 🔴 = user request, decision, or new direction
-  - 🟡 = agent action, user confirmation, follow-up, or continuation
-  - ✅ = verified outcome (commit pushed, test passed, PR merged)
-- Multiple 🟡 in a row is normal (agent doing several things)
-- 🔴🔴 is fine (user gave context in multiple messages)
-- ✅ can appear anywhere — not only at the end of a group
-- Omit ✅ when there's no clear verified outcome yet
+- Sequence follows what ACTUALLY happened, not a template
+- Multiple same-priority entries in a row is normal
+- Include who (User/Agent) in the text, not via emoji
+- Translate Polish to English
 - Capture KNOWLEDGE in files (schemas, config values, constraints), not just "read file X"
-- Capture errors and who resolved them
-- Use → for file discoveries, indented under agent action
+- Capture errors, root causes, and resolutions
+- Use → for file discoveries, indented under the action
 - Group read-edit-verify into single entries when they're one logical step
 - Skip greetings/chitchat
 - 30-50 lines total, English

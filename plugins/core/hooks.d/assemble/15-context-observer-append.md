@@ -4,22 +4,23 @@ Output the log directly — no thinking, no preamble, no explanation.
 
 Format for new entries:
 
-- 🔴 User: [what human asked or decided — translate Polish to English]
-- 🟡 Agent: [what agent did]
+- 🔴 Important fact, decision, constraint, deadline, or error
+- 🟡 Contextual detail — configuration, question, clarification
+- 🟢 Routine action, confirmation, or background info
     → file.ts (N bytes/lines): what was IN the file — schemas, values, patterns
-- 🟡 User confirmed / provided context / clarified
-- ✅ Outcome: [verified result, merged PR, test passing, etc.]
+
+Emoji = priority level (like log levels), NOT who said it:
+  🔴 = important — will matter in future turns
+  🟡 = context — may matter later
+  🟢 = info — routine, but worth noting
 
 Rules:
 - Keep ALL existing observations unchanged
 - APPEND new observations at the end
-- Emojis follow what ACTUALLY happened — not a rigid pattern
-  - 🔴 = user request, decision, or new direction
-  - 🟡 = agent action, user confirmation, follow-up, or continuation
-  - ✅ = verified outcome
-- Multiple 🟡 in a row is normal. 🔴🔴 is fine. ✅ anywhere, or omitted.
+- Sequence follows reality, not a template
+- Include who (User/Agent) in the text, not via emoji
 - Capture KNOWLEDGE in files, not just "read file X"
-- Capture errors and resolutions
+- Capture errors, root causes, and resolutions
 - Use → for file discoveries
 - Group read-edit-verify into single entries when logical
 - Skip greetings/chitchat, English
