@@ -1,4 +1,12 @@
-# harness
+# harness (screenfluent fork)
+
+Fork of [wedow/harness](https://github.com/wedow/harness) — a minimal agent loop in bash.
+
+This fork adds **context management**, **Claude OAuth fixes**, and **UX improvements**. See [Fork changes](#fork-changes) below.
+
+Upstream: `git remote add upstream https://github.com/wedow/harness.git`
+
+---
 
 A minimal agent loop in bash. Everything else is plugins.
 
@@ -254,6 +262,74 @@ EOF
 ```
 
 The agent itself can extend the harness by writing new tools or hooks to `.harness/` directories during a session. This is intentional.
+
+## Fork changes
+
+Everything below is specific to the `screenfluent/harness` fork.
+
+### Context management
+
+Hook `15-context` in the assemble pipeline compresses old messages so sessions don't overflow the context window. Two tiers:
+
+- **Phase 1 (zero LLM):** old tool results replaced with one-line summaries (`[read: schema.ts, 88 lines]`)
+- **Phase 2 (Gemini Flash):** observer LLM compresses old messages into observation batches. Incremental (only new messages sent), batched (waits for N new user messages)
+
+Storage: immutable batch files (`obs-0001-u0001-u0008.md`) + `index.json`. Architecture: `parse → decide → execute → assemble → normalize → output` with pure decision function and single exit point. See [docs/CONTEXT-MANAGEMENT.md](docs/CONTEXT-MANAGEMENT.md).
+
+```bash
+export HARNESS_OBSERVER_KEY="your-gemini-key"   # required for Phase 2
+export HARNESS_OBSERVER_MODEL="gemini-3-flash-preview"  # default
+export HARNESS_CONTEXT_KEEP_MSGS=10              # recent messages kept verbatim
+export HARNESS_OBSERVER_BATCH=5                  # new messages before observing
+```
+
+### Claude OAuth fixes
+
+Upstream's Claude OAuth login failed because Cloudflare blocks `curl` User-Agent on `platform.claude.com` (returns 429 "Rate limited"). This fork:
+
+- Sends `User-Agent: node` on all token endpoint calls
+- Local HTTP callback server on `localhost:53692` (auto-captures redirect)
+- 5-minute expiry margin, mkdir-based locking, atomic reads/writes
+- Replaces OAuth credentials on re-login (no stale token accumulation)
+
+### Message assembly fixes
+
+- Frontmatter parser: `---` in response body no longer truncates messages
+- User/assistant alternation enforced (prevents cascading failures after API errors)
+- Empty text blocks filtered
+
+### Error display
+
+Errors display in the streaming REPL (previously swallowed — user only saw `hook exited 1`).
+
+### REPL improvements
+
+- Session history on resume
+- Multiline input with `\` continuation
+- Session info on start
+- Skills deduped, tools sorted
+
+### Tool improvements
+
+- `str_replace`: multi-edit (`edits[]` array), diff display, python-based (no perl escaping bugs)
+- `read_file`: auto-truncation at 2000 lines with pagination
+- Compact colored tool display
+
+### Upstream PRs
+
+| PR | Status | Description |
+|----|--------|-------------|
+| [#1](https://github.com/wedow/harness/pull/1) | Merged | macOS BSD netcat in ChatGPT OAuth |
+| [#3](https://github.com/wedow/harness/pull/3) | Merged | Frontmatter parser + empty text blocks |
+| [#4](https://github.com/wedow/harness/pull/4) | Open | Error display in streaming REPL |
+| [#5](https://github.com/wedow/harness/pull/5) | Open | Complete Claude OAuth fix |
+
+### Syncing with upstream
+
+```bash
+git fetch upstream
+git merge upstream/master
+```
 
 ## License
 
