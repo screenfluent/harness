@@ -42,7 +42,10 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "${expires
     )" --max-time 30)" || { echo "token refresh failed" >&2; exit 1; }
 
   new_access="$(echo "${token_response}" | jq -r '.access_token // empty')"
-  [[ -z "${new_access}" ]] && { echo "token refresh returned no access_token" >&2; exit 1; }
+  [[ -z "${new_access}" ]] && {
+    echo "token refresh failed ($(echo "${token_response}" | jq -r '.error_description // .error.message // .error // "unknown"' 2>/dev/null)) — run: hs auth set claude" >&2
+    exit 1
+  }
 
   new_refresh="$(echo "${token_response}" | jq -r '.refresh_token // empty')"
   expires_in="$(echo "${token_response}" | jq -r '.expires_in // "0"')"
