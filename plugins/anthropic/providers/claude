@@ -13,7 +13,8 @@ refresh_margin=300
   [[ -f "${cache}" ]] || exit 1
   jq -e '.claude | length > 0' "${cache}" &>/dev/null || exit 1
   exp="$(jq -r '.claude[0].expires_at // "0"' "${cache}")"
-  [[ "${exp}" == "0" ]] || [[ "$(date +%s)" -lt "$(( exp - refresh_margin ))" ]]
+  # Unknown expiry (0) is treated as expired — force refresh
+  [[ "${exp}" != "0" ]] && [[ "$(date +%s)" -lt "$(( exp - refresh_margin ))" ]]
   exit $?
 }
 [[ "${1:-}" == "--defaults" ]] && { echo "model=claude-sonnet-4-6"; exit 0; }
@@ -34,7 +35,6 @@ IFS=$'\t' read -r access_token refresh_token expires_at <<< "${_creds}"
 
 [[ -z "${access_token}" ]] && { echo "no claude access_token — run: hs auth set claude" >&2; exit 1; }
 
-# ── Token refresh ──────────────────────────────────────────────────────────
 # Refresh if expired or within the margin window. The margin prevents a race
 # where the token expires between this check and the actual API call.
 now="$(date +%s)"
@@ -100,7 +100,7 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "$(( expir
 
     new_refresh="$(echo "${token_response}" | jq -r '.refresh_token // empty')"
     expires_in="$(echo "${token_response}" | jq -r '.expires_in // "0"')"
-    # Store the real expiry — margin is applied only at check-time
+    [[ "${expires_in}" =~ ^[0-9]+$ ]] || expires_in=0
     new_expires_at="$(( $(date +%s) + expires_in ))"
 
     access_token="${new_access}"
@@ -126,7 +126,7 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "$(( expir
   rmdir "${_lockdir}" 2>/dev/null || true
 fi
 
-# ── Delegate to anthropic provider ─────────────────────────────────────────
+# Configure anthropic provider for OAuth
 export ANTHROPIC_AUTH_HEADER="Authorization: Bearer ${access_token}"
 export ANTHROPIC_BETA="claude-code-20250219,oauth-2025-04-20"
 
