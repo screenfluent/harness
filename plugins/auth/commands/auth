@@ -44,7 +44,7 @@ case "${subcmd}" in
     auth_file="$(_auth_file "${local_flag}")"
     existing="$(_read_auth "${auth_file}")"
     updated="$(echo "${existing}" | jq --arg p "${provider}" --argjson c "${cred}" \
-      '.[$p] = ((.[$p] // []) + [$c])')"
+      '.[$p] = [$c]')"
     mkdir -p "$(dirname "${auth_file}")"
     echo "${updated}" > "${auth_file}"
     chmod 600 "${auth_file}"

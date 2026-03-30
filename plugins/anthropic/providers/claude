@@ -56,6 +56,24 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "${expires
   access_token="${new_access}"
   [[ -n "${new_refresh}" && "${new_refresh}" != "null" ]] && refresh_token="${new_refresh}"
 
+  # Update source .auth.json (walk sources to find the one with claude creds)
+  IFS=':' read -ra _auth_sources <<< "${HARNESS_SOURCES}"
+  auth_file=""
+  for _s in "${_auth_sources[@]}"; do
+    [[ -f "${_s}/.auth.json" ]] && jq -e '.claude | length > 0' "${_s}/.auth.json" &>/dev/null && auth_file="${_s}/.auth.json"
+  done
+  if [[ -n "${auth_file}" ]]; then
+    updated="$(jq \
+      --arg at "${access_token}" \
+      --arg rt "${refresh_token}" \
+      --arg exp "${new_expires_at}" \
+      '.claude[0].access_token = $at
+       | .claude[0].refresh_token = $rt
+       | .claude[0].expires_at = $exp' "${auth_file}")"
+    echo "${updated}" > "${auth_file}"
+    chmod 600 "${auth_file}"
+  fi
+  # Also update cache for this run
   updated="$(jq \
     --arg at "${access_token}" \
     --arg rt "${refresh_token}" \
