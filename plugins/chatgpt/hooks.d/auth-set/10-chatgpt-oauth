@@ -83,9 +83,6 @@ response_body="<html><body><h2>Login successful</h2><p>You can close this tab.</
 printf 'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s' \
   "${#response_body}" "${response_body}" > "${fifo}"
 
-wait "${nc_pid}" 2>/dev/null || true
-nc_pid=""
-
 request="$(cat "${tmpdir}/request")"
 [[ -z "${request}" ]] && { echo "no callback received" >&2; exit 1; }
 
