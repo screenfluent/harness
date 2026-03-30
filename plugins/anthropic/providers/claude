@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# claude — provider plugin for the Anthropic Messages API with Claude.ai OAuth.
-# Receives assembled payload JSON on stdin, outputs the API response.
+# claude — Claude.ai OAuth provider. Handles auth and delegates to anthropic.
 set -euo pipefail
 
 [[ "${1:-}" == "--describe" ]] && { echo "Claude.ai (OAuth)"; exit 0; }
@@ -17,6 +16,9 @@ set -euo pipefail
 ANTHROPIC_MAX_TOKENS  max response tokens (8192)
 ENVEOF
 exit 0; }
+
+# --stream is passed through to the anthropic provider
+[[ "${1:-}" == "--stream" ]] && { _stream="--stream"; shift; } || _stream=""
 
 cache="${HARNESS_HOME:-${HOME}/.harness}/.auth-cache.json"
 [[ -f "${cache}" ]] || { echo "no auth cache — run: hs auth set claude" >&2; exit 1; }
@@ -49,7 +51,6 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "${expires
   access_token="${new_access}"
   [[ -n "${new_refresh}" && "${new_refresh}" != "null" ]] && refresh_token="${new_refresh}"
 
-  # Update auth cache
   updated="$(jq \
     --arg at "${access_token}" \
     --arg rt "${refresh_token}" \
@@ -62,22 +63,21 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "${expires
   echo "refreshed claude token" >&2
 fi
 
-streaming=false
-[[ "${1:-}" == "--stream" ]] && { streaming=true; shift; }
+# Configure anthropic provider for OAuth
+export ANTHROPIC_AUTH_HEADER="Authorization: Bearer ${access_token}"
+export ANTHROPIC_BETA="claude-code-20250219,oauth-2025-04-20"
 
-ANTHROPIC_MAX_TOKENS="${ANTHROPIC_MAX_TOKENS:-8192}"
+# Find the anthropic provider
+IFS=':' read -ra _sources <<< "${HARNESS_SOURCES}"
+_anthropic=""
+for (( _i=${#_sources[@]}-1; _i>=0; _i-- )); do
+  [[ -x "${_sources[_i]}/providers/anthropic" ]] && _anthropic="${_sources[_i]}/providers/anthropic"
+done
+[[ -z "${_anthropic}" ]] && { echo "anthropic provider not found" >&2; exit 1; }
 
+# Pre-process: system prompt as cached content blocks with identity
 payload="$(cat)"
-
-# Extract fields from the assembled payload
-model="$(echo "${payload}" | jq -r '.model // ""')"
-[[ -z "${model}" ]] && model="${HARNESS_MODEL}"
-
 system="$(echo "${payload}" | jq -r '.system // ""')"
-messages="$(echo "${payload}" | jq -c '.messages // []')"
-tools="$(echo "${payload}" | jq -c '.tools // []')"
-
-# Build system as array of content blocks with Claude Code identity prepended
 identity='You are Claude Code, Anthropic'\''s official CLI for Claude.'
 if [[ -n "${system}" ]]; then
   system_blocks="$(jq -n \
@@ -92,150 +92,6 @@ else
     '[{type: "text", text: $identity, cache_control: {type: "ephemeral"}}]'
   )"
 fi
+payload="$(echo "${payload}" | jq -c --argjson s "${system_blocks}" '.system = $s')"
 
-# Build the API request body
-request="$(jq -n \
-  --arg model "${model}" \
-  --argjson max_tokens "${ANTHROPIC_MAX_TOKENS}" \
-  --argjson system "${system_blocks}" \
-  --argjson messages "${messages}" \
-  --argjson tools "${tools}" \
-  '{model: $model, max_tokens: $max_tokens, system: $system, messages: $messages}
-   | if ($tools | length) > 0 then . + {tools: $tools} else . end'
-)"
-
-_api_url="https://api.anthropic.com/v1/messages"
-_api_headers=(
-  -H "Authorization: Bearer ${access_token}"
-  -H "anthropic-version: 2023-06-01"
-  -H "anthropic-beta: claude-code-20250219,oauth-2025-04-20"
-  -H "user-agent: claude-cli/2.1.62"
-  -H "x-app: cli"
-  -H "content-type: application/json"
-)
-
-if [[ "${streaming}" == true ]]; then
-  request="$(echo "${request}" | jq -c '. + {stream: true}')"
-
-  local_model=""
-  input_tokens=0
-  output_tokens=0
-  stop_reason=""
-  text_content=""
-  tool_calls="[]"
-  block_type=""
-  block_id=""
-  block_name=""
-  block_input=""
-  got_message_start=false
-
-  while IFS= read -r line; do
-    [[ -z "${line}" || "${line}" =~ ^event: ]] && continue
-    [[ "${line}" == data:* ]] || continue
-    data="${line#data:}"; data="${data# }"
-
-    event_type="$(echo "${data}" | jq -r '.type // ""')"
-
-    case "${event_type}" in
-      message_start)
-        got_message_start=true
-        local_model="$(echo "${data}" | jq -r '.message.model // ""')"
-        input_tokens="$(echo "${data}" | jq -r '.message.usage.input_tokens // 0')"
-        ;;
-      content_block_start)
-        block_type="$(echo "${data}" | jq -r '.content_block.type // ""')"
-        if [[ "${block_type}" == "tool_use" ]]; then
-          block_id="$(echo "${data}" | jq -r '.content_block.id // ""')"
-          block_name="$(echo "${data}" | jq -r '.content_block.name // ""')"
-          block_input=""
-        fi
-        ;;
-      content_block_delta)
-        delta_type="$(echo "${data}" | jq -r '.delta.type // ""')"
-        if [[ "${delta_type}" == "text_delta" ]]; then
-          text="$(echo "${data}" | jq -j '.delta.text // ""'; printf x)"
-          text="${text%x}"
-          text_content+="${text}"
-          [[ -n "${HARNESS_STREAM_FD:-}" ]] && printf '%s' "${text}" >&"${HARNESS_STREAM_FD}"
-        elif [[ "${delta_type}" == "input_json_delta" ]]; then
-          partial="$(echo "${data}" | jq -r '.delta.partial_json // ""')"
-          block_input+="${partial}"
-        fi
-        ;;
-      content_block_stop)
-        if [[ "${block_type}" == "tool_use" ]]; then
-          parsed_input="$(echo "${block_input}" | jq -c '.' 2>/dev/null || echo '{}')"
-          tool_calls="$(echo "${tool_calls}" | jq -c \
-            --arg id "${block_id}" \
-            --arg name "${block_name}" \
-            --argjson input "${parsed_input}" \
-            '. + [{type: "tool_use", id: $id, name: $name, input: $input}]'
-          )"
-          if [[ -n "${HARNESS_TOOL_FIFO:-}" ]]; then
-            jq -c -n --arg id "${block_id}" --arg name "${block_name}" \
-              --argjson input "${parsed_input}" \
-              '{id: $id, name: $name, input: $input}' > "${HARNESS_TOOL_FIFO}"
-          fi
-          block_type=""
-          block_id=""
-          block_name=""
-          block_input=""
-        fi
-        ;;
-      message_delta)
-        stop_reason="$(echo "${data}" | jq -r '.delta.stop_reason // ""')"
-        output_tokens="$(echo "${data}" | jq -r '.usage.output_tokens // 0')"
-        ;;
-      message_stop|ping)
-        ;;
-    esac
-  done < <(curl -sS -N "${_api_url}" \
-    "${_api_headers[@]}" \
-    -d "${request}" \
-    --max-time 300
-  )
-
-  if [[ "${got_message_start}" == false ]]; then
-    echo "claude streaming error: no message_start received" >&2
-    exit 1
-  fi
-
-  content="[]"
-  if [[ -n "${text_content}" ]]; then
-    content="$(jq -n --arg text "${text_content}" '[{type: "text", text: $text}]')"
-  fi
-  if [[ "$(echo "${tool_calls}" | jq 'length')" -gt 0 ]]; then
-    content="$(echo "${content}" | jq -c --argjson tc "${tool_calls}" '. + $tc')"
-  fi
-
-  jq -n -c \
-    --arg model "${local_model}" \
-    --arg stop_reason "${stop_reason}" \
-    --argjson input_tokens "${input_tokens}" \
-    --argjson output_tokens "${output_tokens}" \
-    --argjson content "${content}" \
-    '{
-      model: $model,
-      stop_reason: $stop_reason,
-      usage: {input_tokens: $input_tokens, output_tokens: $output_tokens},
-      content: $content
-    }'
-  exit 0
-fi
-
-# Non-streaming path
-response="$(curl -sS "${_api_url}" \
-  "${_api_headers[@]}" \
-  -d "${request}" \
-  --max-time 300
-)"
-
-# Check for API errors
-error_type="$(echo "${response}" | jq -r '.type // ""')"
-if [[ "${error_type}" == "error" ]]; then
-  error_msg="$(echo "${response}" | jq -r '.error.message // "unknown error"')"
-  echo "claude API error: ${error_msg}" >&2
-  exit 1
-fi
-
-echo "${response}"
+echo "${payload}" | "${_anthropic}" ${_stream} "$@"
