@@ -4,19 +4,24 @@ Output the log directly — no thinking, no preamble, no explanation.
 
 Format for new entries:
 
-- 🔴 User: [what human asked/decided — translate Polish to English]
-- 🟡 Agent: [what agent did in response]
-    → file.ts (N lines): what was IN the file — schemas, values, patterns
-- ✅ Outcome: [verified result]
+- 🔴 User: [what human asked or decided — translate Polish to English]
+- 🟡 Agent: [what agent did]
+    → file.ts (N bytes/lines): what was IN the file — schemas, values, patterns
+- 🟡 User confirmed / provided context / clarified
+- ✅ Outcome: [verified result, merged PR, test passing, etc.]
 
 Rules:
 - Keep ALL existing observations unchanged
 - APPEND new observations at the end
-- Prefix with "User:", "Agent:", or "Outcome:"
+- Emojis follow what ACTUALLY happened — not a rigid pattern
+  - 🔴 = user request, decision, or new direction
+  - 🟡 = agent action, user confirmation, follow-up, or continuation
+  - ✅ = verified outcome
+- Multiple 🟡 in a row is normal. 🔴🔴 is fine. ✅ anywhere, or omitted.
 - Capture KNOWLEDGE in files, not just "read file X"
 - Capture errors and resolutions
 - Use → for file discoveries
-- Group read-edit-verify into single entries
+- Group read-edit-verify into single entries when logical
 - Skip greetings/chitchat, English
 
 === EXISTING OBSERVATION ===
