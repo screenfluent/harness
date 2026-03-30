@@ -118,6 +118,24 @@ if [[ -n "${refresh_token}" && "${expires_at}" != "0" && "${now}" -ge "$(( expir
     chmod 600 "${_tmp}"
     mv -f "${_tmp}" "${cache}"
     _tmp=""
+
+    # Persist to source .auth.json (cache is rebuilt from it on every run)
+    IFS=':' read -ra _auth_sources <<< "${HARNESS_SOURCES}"
+    for _s in "${_auth_sources[@]}"; do
+      if [[ -f "${_s}/.auth.json" ]] && jq -e '.claude | length > 0' "${_s}/.auth.json" &>/dev/null; then
+        _atmp="$(mktemp "${_s}/.auth.json.XXXXXX")"
+        jq \
+          --arg at "${access_token}" \
+          --arg rt "${refresh_token}" \
+          --argjson exp "${new_expires_at}" \
+          '.claude[0].access_token = $at
+           | .claude[0].refresh_token = $rt
+           | .claude[0].expires_at = $exp' "${_s}/.auth.json" > "${_atmp}"
+        chmod 600 "${_atmp}"
+        mv -f "${_atmp}" "${_s}/.auth.json"
+        break
+      fi
+    done
     echo "refreshed claude token" >&2
   fi
 
