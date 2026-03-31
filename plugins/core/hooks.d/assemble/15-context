@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# 15-context — two-tier context compression.
+#
+# Phase 1: Trim old tool results to one-line summaries.
+# Phase 2: When enough old user messages accumulate, call an observer
+#           LLM to compress them into a dense observation log. The log
+#           replaces old messages in the payload (files stay intact).
+#
+# Config:
+#   HARNESS_CONTEXT_KEEP_MSGS    — recent user messages to keep verbatim (default: 10)
+#   HARNESS_OBSERVER_MODEL       — Gemini model for observation (default: gemini-3-flash-preview)
+#   HARNESS_OBSERVER_KEY         — Gemini API key (required for Phase 2)
+#   HARNESS_OBSERVER_THRESHOLD   — old user messages needed for first observation (default: 5)
+#   HARNESS_OBSERVER_BATCH       — new user messages to batch before observing (default: 5)
+set -euo pipefail
+
+payload="$(cat)"
+keep_msgs="${HARNESS_CONTEXT_KEEP_MSGS:-10}"
+session_dir="${HARNESS_SESSION:-}"
+observer_model="${HARNESS_OBSERVER_MODEL:-gemini-3-flash-preview}"
+observer_key="${HARNESS_OBSERVER_KEY:-}"
+observer_threshold="${HARNESS_OBSERVER_THRESHOLD:-5}"
+observer_batch="${HARNESS_OBSERVER_BATCH:-5}"
+
+result="$(echo "${payload}" | \
+  KEEP_MSGS="${keep_msgs}" \
+  SESSION_DIR="${session_dir}" \
+  OBSERVER_MODEL="${observer_model}" \
+  OBSERVER_KEY="${observer_key}" \
+  OBSERVER_THRESHOLD="${observer_threshold}" \
+  OBSERVER_BATCH="${observer_batch}" \
+  python3 "$(dirname "$0")/15-context.py")" || { echo "${payload}"; exit 0; }
+
+echo "${result}"

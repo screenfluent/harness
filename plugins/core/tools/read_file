@@ -48,12 +48,27 @@ JSON
       exit 1
     fi
 
+    # Max lines to return (override with HARNESS_READ_MAX_LINES)
+    max_lines="${HARNESS_READ_MAX_LINES:-2000}"
+
+    total_lines="$(wc -l < "${path}")"
+    total_lines=$(( total_lines + 0 ))
+
     if [[ -n "${start_line}" && -n "${end_line}" ]]; then
-      sed -n "${start_line},${end_line}p" "${path}" | nl -ba -w4
+      sed -n "${start_line},${end_line}p" "${path}" | nl -ba -w4 -v "${start_line}"
     elif [[ -n "${start_line}" ]]; then
-      tail -n "+${start_line}" "${path}" | nl -ba -w4 -v "${start_line}"
+      tail -n "+${start_line}" "${path}" | head -n "${max_lines}" | nl -ba -w4 -v "${start_line}"
+      remaining=$(( total_lines - start_line - max_lines + 1 ))
+      if (( remaining > 0 )); then
+        echo "[truncated: showing ${max_lines} lines from line ${start_line}. ${remaining} more lines. Use start_line/end_line to continue.]"
+      fi
     else
-      nl -ba -w4 "${path}"
+      if (( total_lines > max_lines )); then
+        head -n "${max_lines}" "${path}" | nl -ba -w4
+        echo "[truncated: showing ${max_lines} of ${total_lines} lines. Use start_line/end_line to read more.]"
+      else
+        nl -ba -w4 "${path}"
+      fi
     fi
     ;;
   *)

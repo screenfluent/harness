@@ -35,7 +35,7 @@ _precomputed="${HARNESS_SESSION}/.tool_dispatch/${call_id}.json"
 if [[ -f "${_precomputed}" ]]; then
   result="$(jq -r '.result' "${_precomputed}")"
   [[ "$(jq -r '.error' "${_precomputed}")" == "true" ]] && error=true
-  echo "[harness] tool pre-dispatched: ${tool_name}" >> "${HARNESS_LOG}"
+  # (logged via display block below)
 elif [[ -z "${tool_bin}" ]]; then
   result="error: tool '${tool_name}' not found"
   error=true
@@ -48,27 +48,72 @@ else
   fi
 fi
 
-# Display tool execution to log
+# Display tool execution
 {
-  printf '── %s ' "${tool_name}"
-  printf '─%.0s' $(seq 1 $(( 50 - ${#tool_name} )))
-  printf '\n'
+  # Tool header
+  printf '\033[2m  ┌ \033[0m\033[1;35m%s\033[0m' "${tool_name}"
 
-  if [[ "${tool_name}" == "bash" ]]; then
-    echo "${input}" | jq -r '.command // empty' | sed 's/^/  /'
-  else
-    echo "${input}" | jq -r 'to_entries[] | "  \(.key)=\(.value)"'
+  # Show key param inline
+  case "${tool_name}" in
+    bash)
+      _cmd="$(echo "${input}" | jq -r '.command // empty')"
+      if (( ${#_cmd} > 80 )); then
+        printf ' \033[36m%s…\033[0m' "${_cmd:0:80}"
+      else
+        printf ' \033[36m%s\033[0m' "${_cmd}"
+      fi
+      ;;
+    read_file|write_file|list_dir)
+      _path="$(echo "${input}" | jq -r '.path // empty')"
+      printf ' \033[36m%s\033[0m' "${_path}"
+      ;;
+    str_replace)
+      _path="$(echo "${input}" | jq -r '.path // empty')"
+      printf ' \033[36m%s\033[0m\n' "${_path}"
+      # Show diff-style old/new for each edit
+      _has_edits="$(echo "${input}" | jq 'has("edits") and (.edits | length > 0)')"
+      if [[ "${_has_edits}" == "true" ]]; then
+        _edit_count="$(echo "${input}" | jq '.edits | length')"
+        for (( _ei=0; _ei<_edit_count; _ei++ )); do
+          _old="$(echo "${input}" | jq -r ".edits[${_ei}].old_str // empty")"
+          _new="$(echo "${input}" | jq -r ".edits[${_ei}].new_str // empty")"
+          if (( ${#_old} > 120 )); then _old="${_old:0:120}…"; fi
+          if (( ${#_new} > 120 )); then _new="${_new:0:120}…"; fi
+          printf '\033[2m  │ \033[31m- %s\033[0m\n' "${_old}"
+          printf '\033[2m  │ \033[32m+ %s\033[0m\n' "${_new}"
+        done
+      else
+        _old="$(echo "${input}" | jq -r '.old_str // empty')"
+        _new="$(echo "${input}" | jq -r '.new_str // empty')"
+        if (( ${#_old} > 120 )); then _old="${_old:0:120}…"; fi
+        if (( ${#_new} > 120 )); then _new="${_new:0:120}…"; fi
+        printf '\033[2m  │ \033[31m- %s\033[0m\n' "${_old}"
+        printf '\033[2m  │ \033[32m+ %s\033[0m\n' "${_new}"
+      fi
+      ;;
+  esac
+  if [[ "${tool_name}" != "str_replace" ]]; then
+    printf '\n'
   fi
 
-  total_lines="$(printf '%s' "${result}" | wc -l)"
-  if (( total_lines > 30 )); then
-    printf '%s\n' "${result}" | head -30 | sed 's/^/  /'
-    printf '  ... (%d more lines)\n' $(( total_lines - 30 ))
-  else
-    printf '%s\n' "${result}" | sed 's/^/  /'
+  # Result (dim, indented, truncated)
+  if [[ -n "${result}" ]]; then
+    total_lines="$(printf '%s' "${result}" | wc -l)"
+    total_lines=$(( total_lines + 0 ))
+    if (( total_lines > 20 )); then
+      printf '%s\n' "${result}" | head -10 | sed $'s/^/\033[2m  \u2502 \033[0m/'
+      printf '\033[2m  │ … %d more lines\033[0m\n' $(( total_lines - 10 ))
+    else
+      printf '%s\n' "${result}" | sed $'s/^/\033[2m  \u2502 \033[0m/'
+    fi
   fi
 
-  [[ "${error}" == "true" ]] && echo "  (error)" || true
+  # Status
+  if [[ "${error}" == "true" ]]; then
+    printf '\033[2m  └ \033[31merror\033[0m\n'
+  else
+    printf '\033[2m  └ done\033[0m\n'
+  fi
 } >> "${HARNESS_LOG}" 2>/dev/null || true
 
 # Return result JSON with remaining tool calls
