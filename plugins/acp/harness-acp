@@ -1,0 +1,596 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["agent-client-protocol>=0.9.0"]
+# ///
+"""
+harness-acp — ACP adapter for the Harness agent loop.
+
+Toad launches this as a subprocess. It speaks JSON-RPC 2.0 on stdio
+and translates to/from Harness CLI operations.
+
+Usage:
+    toad acp harness-acp
+    toad acp "harness-acp --harness-bin /path/to/hs"
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+from acp import (
+    PROTOCOL_VERSION,
+    Agent,
+    InitializeResponse,
+    NewSessionResponse,
+    PromptResponse,
+    run_agent,
+    text_block,
+    update_agent_message,
+    update_agent_message_text,
+    start_tool_call,
+    update_tool_call,
+    tool_content,
+    tool_diff_content,
+)
+from acp.interfaces import Client
+from acp.schema import (
+    AgentCapabilities,
+    AudioContentBlock,
+    ClientCapabilities,
+    EmbeddedResourceContentBlock,
+    HttpMcpServer,
+    ImageContentBlock,
+    Implementation,
+    McpServerStdio,
+    ResourceContentBlock,
+    SseMcpServer,
+    TextContentBlock,
+    ToolCallLocation,
+    ToolCallStatus,
+)
+
+log = logging.getLogger("harness-acp")
+
+# ---------------------------------------------------------------------------
+# Helpers: parse harness session messages
+# ---------------------------------------------------------------------------
+
+def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Parse YAML frontmatter from a harness message file."""
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return {}, text
+    fm_text = text[4:end]
+    body = text[end + 5:]
+    meta: dict[str, str] = {}
+    for line in fm_text.splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip()
+    return meta, body
+
+
+def parse_tool_calls(body: str) -> list[dict[str, Any]]:
+    """Extract tool_call blocks from assistant message body."""
+    calls = []
+    pattern = re.compile(
+        r"```tool_call\s+id=(\S+)\s+name=(\S+)\s*\n(.*?)```",
+        re.DOTALL,
+    )
+    for m in pattern.finditer(body):
+        call_id, name, input_str = m.group(1), m.group(2), m.group(3).strip()
+        try:
+            inp = json.loads(input_str)
+        except json.JSONDecodeError:
+            inp = {"raw": input_str}
+        calls.append({"id": call_id, "name": name, "input": inp})
+    return calls
+
+
+def strip_tool_calls(body: str) -> str:
+    """Remove tool_call blocks from body, return plain text."""
+    cleaned = re.sub(
+        r"```tool_call\s+id=\S+\s+name=\S+\s*\n.*?```\s*",
+        "",
+        body,
+        flags=re.DOTALL,
+    )
+    return cleaned.strip()
+
+
+# ---------------------------------------------------------------------------
+# Helpers: map harness tool names to ACP tool kinds
+# ---------------------------------------------------------------------------
+
+TOOL_KIND_MAP = {
+    "bash": "execute",
+    "read_file": "read",
+    "write_file": "edit",
+    "str_replace": "edit",
+    "list_dir": "read",
+    "agent": "other",
+    "skill": "other",
+}
+
+
+def find_harness_bin() -> str:
+    """Find the harness binary."""
+    # Check --harness-bin flag (passed via sys.argv)
+    for i, arg in enumerate(sys.argv):
+        if arg == "--harness-bin" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith("--harness-bin="):
+            return arg.split("=", 1)[1]
+
+    # Check env
+    if env_bin := os.environ.get("HARNESS_BIN"):
+        return env_bin
+
+    # Check common locations
+    for candidate in [
+        Path(__file__).resolve().parent.parent.parent / "bin" / "harness",
+        Path.home() / "src" / "harness" / "bin" / "harness",
+        shutil.which("hs"),
+        shutil.which("harness"),
+    ]:
+        if candidate and Path(candidate).is_file():
+            return str(candidate)
+
+    raise RuntimeError(
+        "Cannot find harness binary. Set HARNESS_BIN or use --harness-bin."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The ACP Agent
+# ---------------------------------------------------------------------------
+
+class HarnessAgent(Agent):
+    """ACP adapter that wraps the Harness agent loop."""
+
+    def __init__(self) -> None:
+        self._conn: Client | None = None
+        self._sessions: dict[str, str] = {}  # acp_session_id -> harness_session_dir
+        self._harness_bin = find_harness_bin()
+        self._cwd: str = os.getcwd()
+        # Track pending tool call inputs for diff reconstruction
+        # key: (session_id, call_id) -> tool input dict
+        self._pending_tools: dict[tuple[str, str], dict[str, Any]] = {}
+        log.info("Using harness binary: %s", self._harness_bin)
+
+    def on_connect(self, conn: Client) -> None:
+        self._conn = conn
+
+    async def initialize(
+        self,
+        protocol_version: int,
+        client_capabilities: ClientCapabilities | None = None,
+        client_info: Implementation | None = None,
+        **kwargs: Any,
+    ) -> InitializeResponse:
+        log.info("initialize: protocol_version=%d", protocol_version)
+        return InitializeResponse(
+            protocol_version=PROTOCOL_VERSION,
+            agent_capabilities=AgentCapabilities(),
+            agent_info=Implementation(
+                name="harness",
+                title="Harness",
+                version="0.1.0",
+            ),
+        )
+
+    async def new_session(
+        self,
+        cwd: str,
+        mcp_servers: list[HttpMcpServer | SseMcpServer | McpServerStdio],
+        **kwargs: Any,
+    ) -> NewSessionResponse:
+        log.info("new_session: cwd=%s", cwd)
+        self._cwd = cwd
+        session_id = f"hs-{uuid.uuid4().hex[:12]}"
+        # Don't create harness session yet — it will be created on first prompt
+        self._sessions[session_id] = ""
+        return NewSessionResponse(session_id=session_id, modes=None)
+
+    async def prompt(
+        self,
+        prompt: list[
+            TextContentBlock
+            | ImageContentBlock
+            | AudioContentBlock
+            | ResourceContentBlock
+            | EmbeddedResourceContentBlock
+        ],
+        session_id: str,
+        **kwargs: Any,
+    ) -> PromptResponse:
+        log.info("prompt: session=%s", session_id)
+        conn = self._conn
+        assert conn is not None
+
+        # Extract text from prompt blocks
+        text_parts = []
+        for block in prompt:
+            if isinstance(block, TextContentBlock):
+                text_parts.append(block.text)
+            elif isinstance(block, EmbeddedResourceContentBlock):
+                res = block.resource
+                if hasattr(res, "text") and res.text:
+                    uri = getattr(res, "uri", "file")
+                    text_parts.append(f"[file: {uri}]\n{res.text}")
+        user_message = "\n".join(text_parts)
+        if not user_message.strip():
+            return PromptResponse(stop_reason="end_turn")
+
+        # Run harness and collect messages
+        stop_reason = await self._run_harness(session_id, user_message, conn)
+        return PromptResponse(stop_reason=stop_reason)
+
+    async def _run_harness(
+        self, session_id: str, message: str, conn: Client
+    ) -> str:
+        """Run harness in one-shot mode, watch session dir for new messages, emit ACP updates."""
+
+        harness_session_dir = self._sessions.get(session_id, "")
+
+        # Build command
+        env = {
+            **os.environ,
+            "HARNESS_STREAM": "",  # disable streaming — we parse message files
+            "HARNESS_LOG": "/dev/stderr",
+        }
+
+        cmd = [self._harness_bin]
+        if harness_session_dir:
+            # Resume existing session — pass session ID as argument + message as args
+            harness_id = os.path.basename(harness_session_dir)
+            cmd.extend([harness_id, message])
+            message = ""  # don't pipe on stdin
+
+        log.info("Running: %s (cwd=%s)", cmd, self._cwd)
+
+        # Track existing messages before we start
+        msg_dir = ""
+        existing_messages: set[str] = set()
+        if harness_session_dir:
+            msg_dir = os.path.join(harness_session_dir, "messages")
+            if os.path.isdir(msg_dir):
+                existing_messages = set(os.listdir(msg_dir))
+
+        # Run harness as subprocess
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self._cwd,
+            env=env,
+        )
+
+        # Send message on stdin (only for new sessions — resumed sessions get it as args)
+        assert proc.stdin is not None
+        if message:
+            proc.stdin.write(message.encode("utf-8"))
+        proc.stdin.close()
+
+        # For new sessions, we need to discover the session dir from stderr
+        # Harness prints "session: <id>" on stderr
+        stderr_lines: list[str] = []
+
+        async def read_stderr():
+            assert proc.stderr is not None
+            async for line in proc.stderr:
+                decoded = line.decode("utf-8", errors="replace").strip()
+                stderr_lines.append(decoded)
+                log.info("harness stderr: %s", decoded)
+                # Discover session dir
+                if decoded.startswith("session: "):
+                    harness_id = decoded.split("session: ", 1)[1].strip()
+                    nonlocal harness_session_dir, msg_dir, existing_messages
+                    # Find sessions dir
+                    sessions_base = os.environ.get(
+                        "HARNESS_SESSIONS",
+                        os.path.join(os.environ.get("HOME", ""), ".harness", "sessions"),
+                    )
+                    # Also check local .harness/sessions
+                    candidate = os.path.join(self._cwd, ".harness", "sessions", harness_id)
+                    if os.path.isdir(candidate):
+                        harness_session_dir = candidate
+                    elif os.path.isdir(os.path.join(sessions_base, harness_id)):
+                        harness_session_dir = os.path.join(sessions_base, harness_id)
+                    self._sessions[session_id] = harness_session_dir
+                    msg_dir = os.path.join(harness_session_dir, "messages")
+                    log.info("Discovered session dir: %s", harness_session_dir)
+
+        # Poll for new message files while harness runs
+        async def poll_messages():
+            seen: set[str] = set(existing_messages)
+            while True:
+                if msg_dir and os.path.isdir(msg_dir):
+                    current = set(os.listdir(msg_dir))
+                    new_files = sorted(current - seen)
+                    for fname in new_files:
+                        seen.add(fname)
+                        if fname in existing_messages:
+                            continue
+                        fpath = os.path.join(msg_dir, fname)
+                        try:
+                            content = Path(fpath).read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            continue
+                        await self._emit_message(session_id, fname, content, conn)
+                await asyncio.sleep(0.3)
+
+        # Run stderr reader, message poller, and wait for process
+        stderr_task = asyncio.create_task(read_stderr())
+        poll_task = asyncio.create_task(poll_messages())
+
+        # Read stdout ourselves (don't use communicate — it conflicts with async readers)
+        assert proc.stdout is not None
+        stdout_data = await proc.stdout.read()
+
+        # Wait for process to finish
+        await proc.wait()
+
+        # Give message files time to be flushed
+        await asyncio.sleep(0.5)
+
+        stderr_task.cancel()
+        poll_task.cancel()
+        try:
+            await stderr_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await poll_task
+        except asyncio.CancelledError:
+            pass
+
+        # Final sweep of messages
+        if msg_dir and os.path.isdir(msg_dir):
+            current = set(os.listdir(msg_dir))
+            final_new = sorted(current - existing_messages)
+            already_emitted = getattr(self, f"_emitted_{session_id}", set())
+            for fname in final_new:
+                if fname in already_emitted:
+                    continue
+                fpath = os.path.join(msg_dir, fname)
+                try:
+                    content = Path(fpath).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                await self._emit_message(session_id, fname, content, conn)
+
+        if proc.returncode != 0:
+            error_text = "\n".join(stderr_lines) if stderr_lines else "harness exited with error"
+            await conn.session_update(session_id, update_agent_message_text(f"Error: {error_text}"))
+            return "error"
+
+        return "end_turn"
+
+    async def _emit_message(
+        self,
+        session_id: str,
+        filename: str,
+        content: str,
+        conn: Client,
+    ) -> None:
+        """Parse a harness message file and emit appropriate ACP updates."""
+        # Track what we've already emitted
+        emitted_key = f"_emitted_{session_id}"
+        if not hasattr(self, emitted_key):
+            setattr(self, emitted_key, set())
+        emitted: set[str] = getattr(self, emitted_key)
+        if filename in emitted:
+            return
+        emitted.add(filename)
+
+        meta, body = parse_frontmatter(content)
+        role = meta.get("role", "")
+
+        if role == "assistant":
+            # Extract and emit tool calls
+            tool_calls = parse_tool_calls(body)
+            for tc in tool_calls:
+                kind = TOOL_KIND_MAP.get(tc["name"], "other")
+                title = self._tool_title(tc["name"], tc["input"])
+
+                # Store tool input for later diff reconstruction
+                self._pending_tools[(session_id, tc["id"])] = {
+                    "name": tc["name"],
+                    "input": tc["input"],
+                }
+
+                # Build diff content for edit tools at start time
+                start_content = None
+                if tc["name"] == "write_file":
+                    path = tc["input"].get("path", "")
+                    content_text = tc["input"].get("content", "")
+                    if path:
+                        abs_path = path if os.path.isabs(path) else os.path.join(self._cwd, path)
+                        old_text = None
+                        try:
+                            old_text = Path(abs_path).read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            pass
+                        start_content = [tool_diff_content(abs_path, content_text, old_text)]
+                elif tc["name"] == "str_replace":
+                    path = tc["input"].get("path", "")
+                    if path:
+                        abs_path = path if os.path.isabs(path) else os.path.join(self._cwd, path)
+                        old_text = None
+                        try:
+                            old_text = Path(abs_path).read_text(encoding="utf-8")
+                        except (OSError, UnicodeDecodeError):
+                            pass
+                        # For str_replace, we know old_str→new_str, build new content
+                        new_text = self._apply_str_replace(old_text, tc["input"])
+                        if new_text is not None:
+                            start_content = [tool_diff_content(abs_path, new_text, old_text)]
+
+                # Emit tool_call start
+                locations = self._tool_locations(tc["name"], tc["input"])
+                await conn.session_update(
+                    session_id,
+                    start_tool_call(
+                        tool_call_id=tc["id"],
+                        title=title,
+                        kind=kind,
+                        status="in_progress",
+                        raw_input=tc["input"],
+                        locations=locations,
+                        content=start_content,
+                    ),
+                )
+
+            # Emit text content (without tool call blocks)
+            text = strip_tool_calls(body)
+            if text:
+                await conn.session_update(
+                    session_id,
+                    update_agent_message_text(text),
+                )
+
+        elif role == "tool_result":
+            call_id = meta.get("call_id", "")
+            tool_name = meta.get("tool", "")
+            is_error = meta.get("error", "false") == "true"
+            status: ToolCallStatus = "failed" if is_error else "completed"
+
+            # Build content for the tool call update
+            tc_content = []
+
+            # For edit tools, try to build a diff from the pending tool call info
+            diff = self._pop_pending_diff(session_id, call_id)
+            if diff:
+                tc_content.append(diff)
+                # Also add the result text if any
+                result_text = body.strip()
+                if result_text:
+                    tc_content.append(tool_content(text_block(result_text)))
+            else:
+                tc_content.append(tool_content(text_block(body.strip() or "(no output)")))
+
+            await conn.session_update(
+                session_id,
+                update_tool_call(
+                    tool_call_id=call_id,
+                    status=status,
+                    content=tc_content,
+                ),
+            )
+
+    def _tool_title(self, name: str, inp: dict[str, Any]) -> str:
+        """Generate a human-readable title for a tool call."""
+        if name == "bash":
+            cmd = inp.get("command", "")
+            if len(cmd) > 60:
+                cmd = cmd[:57] + "..."
+            return f"bash: {cmd}"
+        elif name == "read_file":
+            return f"Read {inp.get('path', '?')}"
+        elif name == "write_file":
+            return f"Write {inp.get('path', '?')}"
+        elif name == "str_replace":
+            return f"Edit {inp.get('path', '?')}"
+        elif name == "list_dir":
+            return f"List {inp.get('path', '.')}"
+        elif name == "agent":
+            return "Spawn subagent"
+        elif name == "skill":
+            return f"Load skill: {inp.get('name', '?')}"
+        return name
+
+    def _tool_locations(self, name: str, inp: dict[str, Any]) -> list[ToolCallLocation] | None:
+        """Extract file locations from tool input."""
+        path = inp.get("path")
+        if path and name in ("read_file", "write_file", "str_replace", "list_dir"):
+            # Make absolute
+            if not os.path.isabs(path):
+                path = os.path.join(self._cwd, path)
+            line = inp.get("start_line")
+            return [ToolCallLocation(path=path, line=line)]
+        return None
+
+    def _pop_pending_diff(self, session_id: str, call_id: str) -> Any:
+        """Pop pending tool info and return a diff content block if applicable."""
+        key = (session_id, call_id)
+        info = self._pending_tools.pop(key, None)
+        if not info:
+            return None
+        name = info["name"]
+        inp = info["input"]
+        if name not in ("write_file", "str_replace"):
+            return None
+        path = inp.get("path", "")
+        if not path:
+            return None
+        abs_path = path if os.path.isabs(path) else os.path.join(self._cwd, path)
+        # Read the file as it is NOW (after the tool ran)
+        try:
+            new_text = Path(abs_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        # We already sent the diff at start time with the pre-edit content,
+        # so for the update we just confirm with the actual result
+        return tool_diff_content(abs_path, new_text, info.get("_old_text"))
+
+    def _apply_str_replace(self, old_text: str | None, inp: dict[str, Any]) -> str | None:
+        """Apply str_replace edits to get the new text. Returns None on failure."""
+        if old_text is None:
+            return None
+        result = old_text
+        # Single edit
+        old_str = inp.get("old_str")
+        new_str = inp.get("new_str")
+        if old_str is not None and new_str is not None:
+            if old_str in result:
+                result = result.replace(old_str, new_str, 1)
+                return result
+        # Multi-edit
+        edits = inp.get("edits", [])
+        for edit in edits:
+            o = edit.get("old_str", "")
+            n = edit.get("new_str", "")
+            if o in result:
+                result = result.replace(o, n, 1)
+        if result != old_text:
+            return result
+        return None
+
+    async def cancel(self, session_id: str, **kwargs: Any) -> None:
+        log.info("cancel: session=%s", session_id)
+        # TODO: kill running harness subprocess
+
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
+        pass
+
+
+async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(message)s",
+        stream=sys.stderr,
+    )
+    await run_agent(HarnessAgent())
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

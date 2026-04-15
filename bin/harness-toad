@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# harness-toad — launch Harness inside Toad TUI
+set -euo pipefail
+
+HARNESS_ROOT="${HARNESS_ROOT:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)}"
+ACP_BIN="${HARNESS_ROOT}/plugins/acp/harness-acp"
+
+if ! command -v toad &>/dev/null; then
+  echo "toad not found. Install: uv tool install -U batrachian-toad --python 3.14" >&2
+  exit 1
+fi
+
+exec toad acp "${ACP_BIN}" -t "Harness" "$@"
